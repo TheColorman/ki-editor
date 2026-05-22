@@ -63,6 +63,7 @@ mod thread;
 pub mod transformation;
 pub mod ui_tree;
 mod utils;
+mod wakatime;
 use std::{rc::Rc, sync::Mutex};
 
 use anyhow::Context;
