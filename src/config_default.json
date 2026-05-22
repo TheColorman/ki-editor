@@ -36,5 +36,9 @@
     "indent_width": 4,
     "indent_char": "space",
     "show_key_in_keymap": false,
-    "icon_style": "emoji"
+    "icon_style": "emoji",
+    "wakatime": {
+        "enabled": false,
+        "cli_path": "wakatime-cli"
+    }
 }
