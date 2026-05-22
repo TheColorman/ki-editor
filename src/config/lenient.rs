@@ -85,6 +85,7 @@ pub(super) fn extract_lenient(figment: &figment::Figment) -> Extracted<RawConfig
     let (show_key_in_keymap, show_key_in_keymap_error) =
         extract_field!(show_key_in_keymap, "show_key_in_keymap");
     let (icon_style, icon_style_error) = extract_field!(icon_style, "icon_style");
+    let (wakatime, wakatime_error) = extract_field!(wakatime, "wakatime");
 
     let config = RawConfig {
         languages,
@@ -97,6 +98,7 @@ pub(super) fn extract_lenient(figment: &figment::Figment) -> Extracted<RawConfig
         indent_width,
         show_key_in_keymap,
         icon_style,
+        wakatime,
     };
 
     let errors = language_errors
@@ -110,6 +112,7 @@ pub(super) fn extract_lenient(figment: &figment::Figment) -> Extracted<RawConfig
         .chain(indent_width_error)
         .chain(show_key_in_keymap_error)
         .chain(icon_style_error)
+        .chain(wakatime_error)
         .collect();
 
     (config, errors).into()

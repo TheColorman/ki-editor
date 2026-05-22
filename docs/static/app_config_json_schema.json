@@ -57,6 +57,13 @@
         },
         "theme": {
             "$ref": "#/$defs/Theme"
+        },
+        "wakatime": {
+            "$ref": "#/$defs/WakaTimeConfig",
+            "default": {
+                "cli_path": "wakatime-cli",
+                "enabled": false
+            }
         }
     },
     "additionalProperties": false,
@@ -479,6 +486,20 @@
                 "VS Code (Light)",
                 "Very Dark"
             ]
+        },
+        "WakaTimeConfig": {
+            "type": "object",
+            "properties": {
+                "cli_path": {
+                    "type": "string",
+                    "default": "wakatime-cli"
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "default": false
+                }
+            },
+            "additionalProperties": false
         }
     }
 }

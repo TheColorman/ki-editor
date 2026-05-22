@@ -57,6 +57,7 @@ use crate::{
     syntax_highlight::{HighlightedSpans, SyntaxHighlightRequest, SyntaxHighlightRequestBatchId},
     thread::{debounce, Callback, SendResult},
     ui_tree::{ComponentKind, KindedComponent},
+    wakatime::WakaTime,
 };
 use anyhow::ensure;
 use event::{event::Event, KeyEvent, KeyEventKind};
@@ -107,6 +108,7 @@ pub struct App<T: Frontend> {
 
     keymap_override: Option<AppKeymapOverride>,
     pub layout: Layout,
+    wakatime: Option<WakaTime>,
 
     frontend: Rc<Mutex<T>>,
 
@@ -252,6 +254,11 @@ impl<T: Frontend> App<T> {
             },
             sender,
             keymap_override: None,
+            wakatime: if !is_running_as_embedded && AppConfig::singleton().wakatime().enabled() {
+                Some(WakaTime::new(AppConfig::singleton().wakatime().clone()))
+            } else {
+                None
+            },
             layout: Layout::new(
                 dimension.decrement_height(status_lines.len()),
                 &working_directory,
@@ -802,10 +809,16 @@ impl<T: Frontend> App<T> {
             Dispatch::OpenPipeToShellPrompt => self.open_pipe_to_shell_prompt()?,
             Dispatch::OpenFile { path, owner, focus } => {
                 self.open_file(&path, owner, true, focus)?;
+                if focus {
+                    self.send_wakatime_heartbeat(path, false);
+                }
             }
             Dispatch::OpenFileFromPathBuf { path, owner, focus } => {
                 let canonicalized_path = path.try_into()?;
                 self.open_file(&canonicalized_path, owner, true, focus)?;
+                if focus {
+                    self.send_wakatime_heartbeat(canonicalized_path, false);
+                }
             }
             Dispatch::OpenFilePicker(kind) => {
                 self.open_file_picker(kind)?;
@@ -1010,6 +1023,7 @@ impl<T: Frontend> App<T> {
                     )?;
                 }
                 if let Some(path) = path.clone() {
+                    self.send_wakatime_heartbeat(path.clone(), false);
                     self.lsp_manager().send_message(
                         path.clone(),
                         FromEditor::TextDocumentDidChange {
@@ -1021,6 +1035,7 @@ impl<T: Frontend> App<T> {
                 }
             }
             Dispatch::DocumentDidSave { path } => {
+                self.send_wakatime_heartbeat(path.clone(), true);
                 // Emit an integration event for buffer save
                 // Find the component that has this path
                 for component in self.layout.components() {
@@ -2439,6 +2454,12 @@ impl<T: Frontend> App<T> {
 
     pub fn get_current_file_path(&self) -> Option<AbsolutePath> {
         self.current_component().borrow().path()
+    }
+
+    fn send_wakatime_heartbeat(&mut self, path: AbsolutePath, is_write: bool) {
+        if let Some(wakatime) = &mut self.wakatime {
+            wakatime.send_heartbeat(path, is_write);
+        }
     }
 
     pub fn set_global_mode(&mut self, mode: Option<GlobalMode>) -> anyhow::Result<()> {

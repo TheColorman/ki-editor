@@ -10,6 +10,7 @@ use crate::app::StatusLine;
 use crate::components::editor_keymap::{builtin_layout_map, KeyboardLayout, KeyboardLayoutKeys};
 use crate::scripting::{Keybinding, Script};
 use crate::themes::Theme;
+use crate::wakatime::WakaTimeConfig;
 use figment::providers;
 use figment::providers::Format;
 use figment::Provider;
@@ -33,6 +34,7 @@ pub struct AppConfig {
     indent_width: usize,
     show_key_in_keymap: bool,
     icon_config: shared::icons::IconsConfig,
+    wakatime: WakaTimeConfig,
     load_errors: Vec<String>,
 }
 
@@ -51,6 +53,8 @@ pub struct RawConfig {
     show_key_in_keymap: bool,
     #[serde(default)]
     icon_style: shared::icons::IconStyle,
+    #[serde(default)]
+    wakatime: WakaTimeConfig,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -120,6 +124,7 @@ impl TryFrom<RawConfig> for AppConfig {
             indent_width: value.indent_width,
             show_key_in_keymap: value.show_key_in_keymap,
             icon_config: shared::icons::build_icon_config(&value.icon_style),
+            wakatime: value.wakatime,
             load_errors: Vec::new(),
         })
     }
@@ -452,6 +457,10 @@ impl AppConfig {
 
     pub fn icon_config(&self) -> &shared::icons::IconsConfig {
         &self.icon_config
+    }
+
+    pub fn wakatime(&self) -> &WakaTimeConfig {
+        &self.wakatime
     }
 }
 
