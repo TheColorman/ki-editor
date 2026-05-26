@@ -596,13 +596,13 @@ impl LspServerProcess {
                                     );
                                 });
                             sender
-                            .send(LspServerProcessMessage::Shutdown(None))
-                            .unwrap_or_else(|error| {
-                                lsp_error!(
-                                    lsp_command,
-                                    "[LspServerProcess] Error sending Shutdown to the loop outside: {error:?}"
-                                );
-                            });
+                                .send(LspServerProcessMessage::Shutdown(None))
+                                .unwrap_or_else(|error| {
+                                    lsp_error!(
+                                        lsp_command,
+                                        "[LspServerProcess] Error sending Shutdown to the loop outside: {error:?}"
+                                    );
+                                });
                             break;
                         }
                     }
@@ -1352,6 +1352,26 @@ impl LspServerProcess {
     }
 
     fn text_document_did_save(&mut self, file_path: AbsolutePath) -> Result<(), anyhow::Error> {
+        if !self.has_capability(
+            |capabilities| match capabilities.text_document_sync.as_ref() {
+                // Legacy numeric synchronization enables saves without document text.
+                Some(TextDocumentSyncCapability::Kind(kind)) => {
+                    matches!(
+                        *kind,
+                        TextDocumentSyncKind::FULL | TextDocumentSyncKind::INCREMENTAL
+                    )
+                }
+                Some(TextDocumentSyncCapability::Options(options)) => matches!(
+                    options.save.as_ref(),
+                    Some(TextDocumentSyncSaveOptions::Supported(true))
+                        | Some(TextDocumentSyncSaveOptions::SaveOptions(_))
+                ),
+                None => false,
+            },
+        ) {
+            return Ok(());
+        }
+
         self.send_notification::<lsp_notification!("textDocument/didSave")>(
             DidSaveTextDocumentParams {
                 text_document: path_buf_to_text_document_identifier(file_path)?,
@@ -1981,6 +2001,80 @@ mod test_lsp_server_process {
     use super::*;
     use std::process::Command;
     use std::sync::mpsc;
+
+    #[test]
+    fn did_save_respects_server_capabilities() -> anyhow::Result<()> {
+        use serde_json::json;
+
+        [
+            (json!(null), false),
+            (json!({}), false),
+            (json!({ "textDocumentSync": 0 }), false),
+            (json!({ "textDocumentSync": 1 }), true),
+            (json!({ "textDocumentSync": 2 }), true),
+            (json!({ "textDocumentSync": {} }), false),
+            (json!({ "textDocumentSync": { "save": false } }), false),
+            (json!({ "textDocumentSync": { "save": true } }), true),
+            (json!({ "textDocumentSync": { "save": {} } }), true),
+            (
+                json!({ "textDocumentSync": { "save": { "includeText": false } } }),
+                true,
+            ),
+        ]
+        .into_iter()
+        .try_for_each(|(capabilities, should_send)| -> anyhow::Result<()> {
+            let (app_sender, _) = crossbeam_channel::unbounded();
+            let (sender, _) = mpsc::channel();
+            let mut child = Command::new("cat")
+                .stdin(process::Stdio::piped())
+                .stdout(process::Stdio::piped())
+                .spawn()?;
+            let file_path: AbsolutePath = std::env::current_dir()?.try_into()?;
+            let mut lsp_process = LspServerProcess {
+                language: Language::default(),
+                stdin: child.stdin.take(),
+                stdout: None,
+                stderr: None,
+                child,
+                shutting_down: Arc::new(AtomicBool::new(false)),
+                server_capabilities: serde_json::from_value(capabilities.clone())?,
+                current_working_directory: file_path.clone(),
+                next_request_id: 0,
+                pending_response_requests: HashMap::new(),
+                pending_call_hierarchy_directions: HashMap::new(),
+                app_message_sender: app_sender,
+                sender,
+                progress_notification_manager: ProgressNotificationManager::new(
+                    "nothing".to_string(),
+                    Callback::new(Arc::new(|_| {})),
+                ),
+            };
+
+            let result = lsp_process.text_document_did_save(file_path.clone());
+            drop(lsp_process.stdin.take());
+            let output = lsp_process.child.wait_with_output()?;
+            result?;
+            assert!(output.status.success());
+            let output = String::from_utf8(output.stdout)?;
+            if should_send {
+                let (header, body) = output.split_once("\r\n\r\n").unwrap();
+                assert_eq!(header, format!("Content-Length: {}", body.len()));
+                let notification: serde_json::Value = serde_json::from_str(body)?;
+                assert_eq!(notification["method"], "textDocument/didSave");
+                assert_eq!(
+                    notification["params"]["textDocument"]["uri"],
+                    json!(path_buf_to_url(file_path)?)
+                );
+                assert!(notification["params"].get("text").is_none());
+            } else {
+                assert!(
+                    output.is_empty(),
+                    "Unexpected save for {capabilities}: {output}"
+                );
+            }
+            Ok(())
+        })
+    }
 
     #[test]
     fn lsp_should_shutdown_after_too_many_consecutive_errors() -> anyhow::Result<()> {
