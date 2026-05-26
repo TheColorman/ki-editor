@@ -321,6 +321,7 @@ impl Component for Editor {
             #[cfg(test)]
             SetLanguage(language) => self.set_language(*language)?,
             Save => return self.do_save(false, context),
+            SaveWithoutFormatting => return self.save_without_formatting(context),
             ForceSave => {
                 return self.do_save(true, context);
             }
@@ -3056,6 +3057,36 @@ impl Editor {
         self.do_save(false, context)
     }
 
+    pub fn save_without_formatting(&mut self, context: &Context) -> anyhow::Result<Dispatches> {
+        let (dispatches, path) = if context.is_running_as_embedded() {
+            (Dispatches::default(), self.path())
+        } else {
+            self.buffer
+                .borrow_mut()
+                .save_without_formatting(context, false)?
+        };
+
+        let Some(path) = path else {
+            return Ok(Dispatches::one(Dispatch::OpenSaveAsPrompt));
+        };
+
+        self.clamp(context)?;
+        self.cursor_keep_primary_only();
+        self.enter_normal_mode(context)?;
+        Ok(Dispatches::one(Dispatch::RemainOnlyCurrentComponent)
+            .append(Dispatch::DocumentDidSave { path })
+            .chain(self.get_document_did_change_dispatch())
+            .append(Dispatch::RemainOnlyCurrentComponent)
+            .chain(dispatches)
+            .append_some(if self.selection_set.mode().is_contiguous() {
+                Some(Dispatch::ToEditor(MoveSelection(Movement::Current(
+                    IfCurrentNotFound::LookForward,
+                ))))
+            } else {
+                None
+            }))
+    }
+
     fn do_save(&mut self, force: bool, context: &Context) -> anyhow::Result<Dispatches> {
         let last_visible_line = self.last_visible_line(context);
 
@@ -5194,6 +5225,7 @@ pub enum DispatchEditor {
     SetSelectionMode(IfCurrentNotFound, SelectionMode),
     SetSelectionModeWithPriorChange(IfCurrentNotFound, SelectionMode, Option<PriorChange>),
     Save,
+    SaveWithoutFormatting,
     ForceSave,
     FindOneChar(IfCurrentNotFound),
     MoveSelection(Movement),
