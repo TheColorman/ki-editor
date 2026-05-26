@@ -502,6 +502,11 @@ pub fn space_editor_keymap_legend_config() -> KeymapLegendConfig {
                 "Force Save",
                 Dispatch::ToEditor(DispatchEditor::ForceSave),
             ),
+            Keybinding::new_undocumented(
+                key!("a"),
+                "Save Without Formatting",
+                Dispatch::ToEditor(DispatchEditor::SaveWithoutFormatting),
+            ),
             Keybinding::new_undocumented(key!("c"), "Save All", Dispatch::SaveAll),
             Keybinding::new_undocumented(key!("q"), "Quit No Save", Dispatch::QuitNoSave),
             Keybinding::new_undocumented(key!("v"), "Quit", Dispatch::SafeQuit),
