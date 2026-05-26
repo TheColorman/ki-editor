@@ -336,7 +336,8 @@
             [rustToolchain]
             ++ commonNativeBuildInputs
             ++ platformBuildInputs
-            ++ devOnlyPackages;
+            ++ devOnlyPackages
+            ++ [rustToolchain];
 
           # Include common environment variables and platform-specific paths
           shellHook = ''
