@@ -579,12 +579,21 @@ impl LspServerProcess {
                                 .map(|(index, error)| format!("Error #{}: {}", index + 1, error))
                                 .collect_vec()
                                 .join("\n");
-                            let error = format!(
-                            "LspServerProcess::listen: Stopping LSP command:\n\n`{}`\n\nToo many consecutive errors ({}):\n{}",
-                            lsp_command,
-                            ErrorTracker::MAX_CONSECUTIVE_ERRORS,
-                            formatted_errors
-                        );
+                            let error = if error_tracker.consecutive_errors.len()
+                                >= ErrorTracker::MAX_CONSECUTIVE_ERRORS
+                            {
+                                format!(
+                                    "LspServerProcess::listen: Stopping LSP command:\n\n`{}`\n\nToo many consecutive errors ({}):\n{}",
+                                    lsp_command,
+                                    ErrorTracker::MAX_CONSECUTIVE_ERRORS,
+                                    formatted_errors
+                                )
+                            } else {
+                                format!(
+                                    "LspServerProcess::listen: Stopping LSP command:\n\n`{}`\n\nLSP server stopped after error:\n{}",
+                                    lsp_command, formatted_errors
+                                )
+                            };
                             app_message_sender
                                 .send(AppMessage::LspNotification(Box::new(
                                     LspNotification::Error(error),
@@ -596,13 +605,13 @@ impl LspServerProcess {
                                     );
                                 });
                             sender
-                            .send(LspServerProcessMessage::Shutdown(None))
-                            .unwrap_or_else(|error| {
-                                lsp_error!(
-                                    lsp_command,
-                                    "[LspServerProcess] Error sending Shutdown to the loop outside: {error:?}"
-                                );
-                            });
+                                .send(LspServerProcessMessage::Shutdown(None))
+                                .unwrap_or_else(|error| {
+                                    lsp_error!(
+                                        lsp_command,
+                                        "[LspServerProcess] Error sending Shutdown to the loop outside: {error:?}"
+                                    );
+                                });
                             break;
                         }
                     }
@@ -692,6 +701,13 @@ impl LspServerProcess {
         reader
             .read_line(&mut line)
             .with_context(|| "Failed to read Content-Length")?;
+        if line.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "LSP server stdout closed",
+            )
+            .into());
+        }
 
         let content_length = line
             .split(':')
@@ -1352,6 +1368,24 @@ impl LspServerProcess {
     }
 
     fn text_document_did_save(&mut self, file_path: AbsolutePath) -> Result<(), anyhow::Error> {
+        let supports_save =
+            self.has_capability(
+                |capabilities| match capabilities.text_document_sync.as_ref() {
+                    Some(TextDocumentSyncCapability::Options(options)) => {
+                        match options.save.as_ref() {
+                            Some(TextDocumentSyncSaveOptions::Supported(supported)) => *supported,
+                            Some(TextDocumentSyncSaveOptions::SaveOptions(_)) => true,
+                            None => false,
+                        }
+                    }
+                    _ => false,
+                },
+            );
+
+        if !supports_save {
+            return Ok(());
+        }
+
         self.send_notification::<lsp_notification!("textDocument/didSave")>(
             DidSaveTextDocumentParams {
                 text_document: path_buf_to_text_document_identifier(file_path)?,
@@ -1932,6 +1966,9 @@ impl ErrorTracker {
         stderr_reader: &mut BufReader<process::ChildStderr>,
         sender: &Sender<LspServerProcessMessage>,
     ) -> bool {
+        let is_unexpected_eof = error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::UnexpectedEof);
         let mut stderr = String::new();
 
         let _ = stderr_reader.read_to_string(&mut stderr).map_err(|err| {
@@ -1957,7 +1994,7 @@ impl ErrorTracker {
         );
         log::warn!("LspServerProcess::listen: stderr = {stderr}");
 
-        if self.consecutive_errors.len() >= self.max_consecutive_errors {
+        if is_unexpected_eof || self.consecutive_errors.len() >= self.max_consecutive_errors {
             // Send exit notification
             let _ = sender.send(LspServerProcessMessage::FromLspServer(serde_json::json!({
                 "jsonrpc": "2.0",
