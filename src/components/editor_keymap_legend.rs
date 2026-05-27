@@ -19,7 +19,7 @@ impl Editor {
         if let Some(dispatches) = self
             .insert_mode_keymap(true)
             .iter()
-            .find(|keymap| keymap.event() == &event.translated)
+            .find(|keymap| keymap.matches(&event))
             .map(|keymap| keymap.get_dispatches())
         {
             Ok(dispatches)

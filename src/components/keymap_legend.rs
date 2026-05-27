@@ -105,7 +105,7 @@ impl Keymap {
     }
 
     pub fn get(&self, event: &CombinedKeyEvent) -> std::option::Option<&Keybinding> {
-        self.0.iter().find(|key| key.event == event.translated)
+        self.0.iter().find(|key| key.matches(event))
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, Keybinding> {
@@ -152,7 +152,14 @@ impl KeymapLegendConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Keybinding {
     event: KeyEvent,
+    match_kind: KeybindingMatchKind,
     action: KeybindingAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum KeybindingMatchKind {
+    Original,
+    Translated,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,6 +173,7 @@ impl Keybinding {
     pub fn new_undocumented(event: KeyEvent, name: &'static str, dispatch: Dispatch) -> Keybinding {
         Keybinding {
             event,
+            match_kind: KeybindingMatchKind::Translated,
             action: KeybindingAction {
                 documentation: None,
                 name: name.into(),
@@ -182,6 +190,7 @@ impl Keybinding {
     ) -> Keybinding {
         Keybinding {
             event,
+            match_kind: KeybindingMatchKind::Translated,
             action: KeybindingAction {
                 documentation: Some(doc),
                 name: name.into(),
@@ -193,6 +202,19 @@ impl Keybinding {
     pub fn new_dynamic(event: KeyEvent, name: String, dispatch: Dispatch) -> Keybinding {
         Keybinding {
             event,
+            match_kind: KeybindingMatchKind::Translated,
+            action: KeybindingAction {
+                documentation: None,
+                name: name.into(),
+                dispatch,
+            },
+        }
+    }
+
+    pub fn new_original(event: KeyEvent, name: &'static str, dispatch: Dispatch) -> Keybinding {
+        Keybinding {
+            event,
+            match_kind: KeybindingMatchKind::Original,
             action: KeybindingAction {
                 documentation: None,
                 name: name.into(),
@@ -211,6 +233,7 @@ impl Keybinding {
     ) -> Keybinding {
         Keybinding {
             event,
+            match_kind: KeybindingMatchKind::Translated,
             action: KeybindingAction {
                 name: name.into(),
                 documentation: None,
@@ -229,6 +252,7 @@ impl Keybinding {
     ) -> Keybinding {
         Keybinding {
             event,
+            match_kind: KeybindingMatchKind::Translated,
             action: KeybindingAction {
                 name: name.into(),
                 documentation: None,
@@ -247,6 +271,14 @@ impl Keybinding {
         &self.event
     }
 
+    pub fn matches(&self, event: &CombinedKeyEvent) -> bool {
+        self.event
+            == match self.match_kind {
+                KeybindingMatchKind::Original => event.original,
+                KeybindingMatchKind::Translated => event.translated,
+            }
+    }
+
     pub fn override_keymap(
         self,
         keymap_override: Option<&super::editor_keymap_legend::KeymapOverride>,
@@ -255,6 +287,7 @@ impl Keybinding {
         match keymap_override {
             Some(keymap_override) => Some(Self {
                 event: self.event,
+                match_kind: self.match_kind,
                 action: KeybindingAction {
                     name: keymap_override.description.into(),
                     dispatch: keymap_override.dispatch.clone(),
