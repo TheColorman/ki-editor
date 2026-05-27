@@ -1180,7 +1180,7 @@ pub fn keymap_universal() -> Vec<Keybinding> {
         ),
         Keybinding::new_undocumented(key!("alt+/"), "⇋ Window", Dispatch::OtherWindow),
         #[cfg(unix)]
-        Keybinding::new_undocumented(key!("ctrl+z"), "Suspend", Dispatch::Suspend),
+        Keybinding::new_original(key!("ctrl+z"), "Suspend", Dispatch::Suspend),
     ]
     .to_vec()
 }
