@@ -4650,40 +4650,30 @@ fn cycling_window_focus_should_not_create_more_windows() -> anyhow::Result<()> {
 }
 
 #[test]
+#[cfg(unix)]
 /// This test case ensure that ctrl+z should not be treated as a positional keybinding.
 fn ctrl_z_should_trigger_suspend_regardless_of_current_layout() -> anyhow::Result<()> {
-    execute_test(|s| {
-        Box::new([
-            App(OpenFile {
-                path: s.main_rs(),
-                owner: BufferOwner::User,
-                focus: true,
-            }),
-            App(OpenThemePicker),
-            Expect(CurrentComponentTitle("Theme".to_string())),
-            Expect(ComponentsLength(3)),
-            App(OtherWindow),
-            Expect(CurrentComponentTitle("Completion".to_string())),
-            Expect(ComponentsLength(3)),
-            App(OtherWindow),
-            Expect(CurrentComponentTitle(
-                "\u{200b} [ ] 🦀 main.rs \u{200b}".to_string(),
-            )),
-            Expect(ComponentsLength(3)),
-            App(OtherWindow),
-            Expect(CurrentComponentTitle("Theme".to_string())),
-            Expect(ComponentsLength(3)),
-            App(OtherWindow),
-            Expect(CurrentComponentTitle("Completion".to_string())),
-            Expect(ComponentsLength(3)),
-            App(OtherWindow),
-            Expect(CurrentComponentTitle(
-                "\u{200b} [ ] 🦀 main.rs \u{200b}".to_string(),
-            )),
-            Expect(ComponentsLength(3)),
-            App(OtherWindow),
-            Expect(CurrentComponentTitle("Theme".to_string())),
-            Expect(ComponentsLength(3)),
-        ])
-    })
+    use crate::{
+        components::{editor_keymap::builtin_layout_map, keymap_legend::Keymap},
+        keymap::keymap_universal,
+    };
+
+    let layout = builtin_layout_map()
+        .remove("COLEMAK-DH (ANSI)")
+        .expect("layout should exist");
+    let keymap = Keymap::new(&keymap_universal());
+
+    let logical_ctrl_z = layout.make_combined_key_event(key!("ctrl+z"));
+    let physical_qwerty_z = layout.make_combined_key_event(key!("ctrl+x"));
+
+    assert_eq!(
+        keymap.get(&logical_ctrl_z).map(Keybinding::display),
+        Some("Suspend".to_string())
+    );
+    assert_eq!(
+        keymap.get(&physical_qwerty_z).map(Keybinding::display),
+        None
+    );
+
+    Ok(())
 }
