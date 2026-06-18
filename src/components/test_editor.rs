@@ -3538,6 +3538,56 @@ fn test_dedent_in_column_mode() -> anyhow::Result<()> {
 }
 
 #[test]
+fn indent_uses_editorconfig_space_indent() -> anyhow::Result<()> {
+    execute_test(|s| {
+        s.temp_dir()
+            .join(".editorconfig")
+            .unwrap()
+            .write("root = true\n\n[*]\nindent_style = space\nindent_size = 2\n")
+            .unwrap();
+
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent("fom".to_string())),
+            Editor(SetSelectionMode(IfCurrentNotFound::LookForward, Character)),
+            Editor(Indent),
+            Expect(CurrentComponentContent("  fom")),
+            Editor(Dedent),
+            Expect(CurrentComponentContent("fom")),
+        ])
+    })
+}
+
+#[test]
+fn indent_uses_editorconfig_tab_indent() -> anyhow::Result<()> {
+    execute_test(|s| {
+        s.temp_dir()
+            .join(".editorconfig")
+            .unwrap()
+            .write("root = true\n\n[*]\nindent_style = tab\nindent_size = 4\n")
+            .unwrap();
+
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent("fom".to_string())),
+            Editor(SetSelectionMode(IfCurrentNotFound::LookForward, Character)),
+            Editor(Indent),
+            Expect(CurrentComponentContent("\tfom")),
+            Editor(Dedent),
+            Expect(CurrentComponentContent("fom")),
+        ])
+    })
+}
+
+#[test]
 fn test_over_dedent() -> anyhow::Result<()> {
     execute_test(|s| {
         Box::new([

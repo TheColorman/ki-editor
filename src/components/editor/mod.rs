@@ -3780,9 +3780,11 @@ impl Editor {
     }
 
     fn indent(&mut self, context: &Context) -> Result<Dispatches, anyhow::Error> {
-        let indentation: Rope = std::iter::repeat_n(context.indent_char(), context.indent_width())
-            .collect::<String>()
-            .into();
+        let indent_settings = self.buffer().indent_settings(context);
+        let indentation: Rope =
+            std::iter::repeat_n(indent_settings.char(), indent_settings.width())
+                .collect::<String>()
+                .into();
         let edit_transaction = EditTransaction::from_action_groups(
             self.selection_set
                 .map(|selection| -> anyhow::Result<_> {
@@ -3815,7 +3817,7 @@ impl Editor {
                         .join("")
                         .into();
                     let select_range = {
-                        let offset: isize = context.indent_width() as isize;
+                        let offset: isize = indent_settings.width() as isize;
                         let start = original_range.start.apply_offset(offset);
                         let original_len = original_range.len();
                         let end =
@@ -3839,6 +3841,7 @@ impl Editor {
     }
 
     fn dedent(&mut self, context: &Context) -> Result<Dispatches, anyhow::Error> {
+        let indent_settings = self.buffer().indent_settings(context);
         let edit_transaction = EditTransaction::from_action_groups(
             self.selection_set
                 .map(|selection| -> anyhow::Result<_> {
@@ -3853,9 +3856,9 @@ impl Editor {
                     let get_remove_leading_char_count = |line: &str| {
                         let leading_indent_count = line
                             .chars()
-                            .take_while(|c| c == &context.indent_char())
+                            .take_while(|c| c == &indent_settings.char())
                             .count();
-                        leading_indent_count.min(context.indent_width())
+                        leading_indent_count.min(indent_settings.width())
                     };
                     let modified_lines = content
                         .lines()
