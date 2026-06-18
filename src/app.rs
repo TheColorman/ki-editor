@@ -26,6 +26,7 @@ use crate::{
         QuickfixListKind, QuickfixListSource, Search,
     },
     edit::Edit,
+    editor_config::EditorConfigSettings,
     file_watcher::{FileWatcherEvent, FileWatcherInput},
     frontend::Frontend,
     git::{self},
@@ -3820,7 +3821,10 @@ Please consider installing it.\n\
     }
 
     fn save_current_buffer_content_to(&mut self, path: AbsolutePath) -> anyhow::Result<()> {
-        path.write(&self.current_component().borrow().content())?;
+        path.write(
+            &EditorConfigSettings::from_path(&path)
+                .format_content_for_save(&self.current_component().borrow().content()),
+        )?;
         self.open_file(&path, BufferOwner::User, true, true)?;
         Ok(())
     }

@@ -774,7 +774,7 @@ impl Buffer {
                 return Ok((dispatches, Some(path.clone())));
             }
 
-            path.write(&self.content())?;
+            path.write(&self.editor_config.format_content_for_save(&self.content()))?;
 
             self.last_synced_time = path.last_modified_time().ok();
 
@@ -1305,6 +1305,7 @@ mod test_buffer {
     use tempfile::tempdir;
 
     use crate::{
+        context::Context,
         grid::{IndexedHighlightGroup, StyleKey},
         selection::SelectionSet,
         syntax_highlight::{HighlightedSpan, HighlightedSpans},
@@ -1497,6 +1498,53 @@ class ObservationSpecification(Base):
         let buffer = Buffer::from_path(&path, true).unwrap();
 
         f(path, buffer);
+    }
+
+    fn run_editorconfig_save_test(editorconfig: &str, content: &str, expected: &str) {
+        let dir = tempdir().unwrap();
+        let editorconfig_path = dir.path().join(".editorconfig");
+        std::fs::write(editorconfig_path, editorconfig).unwrap();
+
+        let file_path = dir.path().join("main.rs");
+        File::create(&file_path).unwrap();
+        let path = AbsolutePath::try_from(file_path).unwrap();
+        path.write("").unwrap();
+
+        let mut buffer = Buffer::from_path(&path, true).unwrap();
+        let _ = buffer.update(content);
+
+        let mut context = Context::default();
+        context.set_file_dirty_status(&path, true);
+        let _ = buffer.save_without_formatting(&context, false).unwrap();
+
+        assert_eq!(path.read().unwrap(), expected);
+    }
+
+    #[test]
+    fn save_without_formatting_uses_editorconfig_trim_trailing_whitespace() {
+        run_editorconfig_save_test(
+            "root = true\n\n[*]\ntrim_trailing_whitespace = true\n",
+            "a  \nb\t \n",
+            "a\nb\n",
+        );
+    }
+
+    #[test]
+    fn save_without_formatting_uses_editorconfig_insert_final_newline() {
+        run_editorconfig_save_test(
+            "root = true\n\n[*]\ninsert_final_newline = true\n",
+            "a",
+            "a\n",
+        );
+    }
+
+    #[test]
+    fn save_without_formatting_uses_editorconfig_end_of_line() {
+        run_editorconfig_save_test(
+            "root = true\n\n[*]\nend_of_line = crlf\n",
+            "a\nb\n",
+            "a\r\nb\r\n",
+        );
     }
 
     mod auto_format {
