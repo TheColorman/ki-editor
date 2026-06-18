@@ -14,6 +14,7 @@ pub mod config;
 mod context;
 mod divide_viewport;
 mod edit;
+mod editor_config;
 mod embed;
 mod env;
 pub mod file_watcher;

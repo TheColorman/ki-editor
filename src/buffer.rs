@@ -1,6 +1,7 @@
 use crate::app::{Dispatch, Dispatches};
 use crate::components::suggestive_editor::Info;
 use crate::context::{Context, FormatterCommand};
+use crate::editor_config::{EditorConfigSettings, IndentSettings};
 use crate::git::hunk::SimpleHunk;
 use crate::git::{DiffMode, GitOperation};
 use crate::history::History;
@@ -48,6 +49,7 @@ pub struct Buffer {
     tree: Option<Tree>,
     treesitter_language: Option<tree_sitter::Language>,
     language: Option<Language>,
+    editor_config: EditorConfigSettings,
     path: Option<AbsolutePath>,
     highlighted_spans: HighlightedSpans,
     diagnostics: Vec<Diagnostic>,
@@ -89,6 +91,7 @@ impl Buffer {
             rope: Rope::from_str(text),
             treesitter_language: language.clone(),
             language: None,
+            editor_config: EditorConfigSettings::default(),
             tree: {
                 let mut parser = Parser::new();
                 language.and_then(|language| {
@@ -357,7 +360,15 @@ impl Buffer {
     }
 
     pub fn update_path(&mut self, path: AbsolutePath) {
+        self.editor_config = EditorConfigSettings::from_path(&path);
         self.path = Some(path);
+    }
+
+    pub(crate) fn indent_settings(&self, context: &Context) -> IndentSettings {
+        self.editor_config.indent_settings(IndentSettings::new(
+            context.indent_char(),
+            context.indent_width(),
+        ))
     }
 
     pub fn get_line_by_char_index(&self, char_index: CharIndex) -> anyhow::Result<Rope> {
@@ -713,6 +724,7 @@ impl Buffer {
 
         buffer.path = Some(path.clone());
         buffer.language = language;
+        buffer.editor_config = EditorConfigSettings::from_path(path);
 
         buffer.last_synced_time = path.last_modified_time().ok();
 
