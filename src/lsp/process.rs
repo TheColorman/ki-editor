@@ -1334,6 +1334,10 @@ impl LspServerProcess {
         version: usize,
         content: String,
     ) -> Result<(), anyhow::Error> {
+        if !self.has_capability(Self::server_supports_text_document_open_close) {
+            return Ok(());
+        }
+
         self.send_notification::<lsp_notification!("textDocument/didOpen")>(
             DidOpenTextDocumentParams {
                 text_document: TextDocumentItem {
@@ -1352,6 +1356,10 @@ impl LspServerProcess {
         version: i32,
         content: String,
     ) -> Result<(), anyhow::Error> {
+        if !self.has_capability(Self::server_supports_text_document_change) {
+            return Ok(());
+        }
+
         self.send_notification::<lsp_notification!("textDocument/didChange")>(
             DidChangeTextDocumentParams {
                 text_document: VersionedTextDocumentIdentifier {
@@ -1368,21 +1376,7 @@ impl LspServerProcess {
     }
 
     fn text_document_did_save(&mut self, file_path: AbsolutePath) -> Result<(), anyhow::Error> {
-        let supports_save =
-            self.has_capability(
-                |capabilities| match capabilities.text_document_sync.as_ref() {
-                    Some(TextDocumentSyncCapability::Options(options)) => {
-                        match options.save.as_ref() {
-                            Some(TextDocumentSyncSaveOptions::Supported(supported)) => *supported,
-                            Some(TextDocumentSyncSaveOptions::SaveOptions(_)) => true,
-                            None => false,
-                        }
-                    }
-                    _ => false,
-                },
-            );
-
-        if !supports_save {
+        if !self.has_capability(Self::server_supports_text_document_save) {
             return Ok(());
         }
 
@@ -1399,6 +1393,10 @@ impl LspServerProcess {
         old: AbsolutePath,
         new: AbsolutePath,
     ) -> Result<(), anyhow::Error> {
+        if !self.has_capability(Self::server_supports_workspace_did_rename_files) {
+            return Ok(());
+        }
+
         self.send_notification::<lsp_notification!("workspace/didRenameFiles")>(RenameFilesParams {
             files: [FileRename {
                 old_uri: old.display_absolute(),
@@ -1409,6 +1407,10 @@ impl LspServerProcess {
     }
 
     fn workspace_did_create_files(&mut self, file_path: AbsolutePath) -> Result<(), anyhow::Error> {
+        if !self.has_capability(Self::server_supports_workspace_did_create_files) {
+            return Ok(());
+        }
+
         self.send_notification::<lsp_notification!("workspace/didCreateFiles")>(CreateFilesParams {
             files: [FileCreate {
                 uri: file_path.display_absolute(),
@@ -1419,6 +1421,53 @@ impl LspServerProcess {
 
     fn has_capability(&self, f: impl Fn(&ServerCapabilities) -> bool) -> bool {
         self.server_capabilities.as_ref().map(f).unwrap_or(false)
+    }
+
+    fn server_supports_text_document_open_close(capabilities: &ServerCapabilities) -> bool {
+        match capabilities.text_document_sync.as_ref() {
+            Some(TextDocumentSyncCapability::Kind(kind)) => *kind != TextDocumentSyncKind::NONE,
+            Some(TextDocumentSyncCapability::Options(options)) => {
+                options.open_close.unwrap_or(false)
+            }
+            None => false,
+        }
+    }
+
+    fn server_supports_text_document_change(capabilities: &ServerCapabilities) -> bool {
+        match capabilities.text_document_sync.as_ref() {
+            Some(TextDocumentSyncCapability::Kind(kind)) => *kind != TextDocumentSyncKind::NONE,
+            Some(TextDocumentSyncCapability::Options(options)) => options
+                .change
+                .is_some_and(|kind| kind != TextDocumentSyncKind::NONE),
+            None => false,
+        }
+    }
+
+    fn server_supports_text_document_save(capabilities: &ServerCapabilities) -> bool {
+        match capabilities.text_document_sync.as_ref() {
+            Some(TextDocumentSyncCapability::Options(options)) => match options.save.as_ref() {
+                Some(TextDocumentSyncSaveOptions::Supported(supported)) => *supported,
+                Some(TextDocumentSyncSaveOptions::SaveOptions(_)) => true,
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn server_supports_workspace_did_create_files(capabilities: &ServerCapabilities) -> bool {
+        capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.file_operations.as_ref())
+            .is_some_and(|file_operations| file_operations.did_create.is_some())
+    }
+
+    fn server_supports_workspace_did_rename_files(capabilities: &ServerCapabilities) -> bool {
+        capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.file_operations.as_ref())
+            .is_some_and(|file_operations| file_operations.did_rename.is_some())
     }
 
     fn text_document_completion(
@@ -2018,6 +2067,71 @@ mod test_lsp_server_process {
     use super::*;
     use std::process::Command;
     use std::sync::mpsc;
+
+    #[test]
+    fn text_document_lifecycle_notifications_require_server_sync_capabilities() {
+        let mut capabilities = ServerCapabilities::default();
+
+        assert!(!LspServerProcess::server_supports_text_document_open_close(
+            &capabilities
+        ));
+        assert!(!LspServerProcess::server_supports_text_document_change(
+            &capabilities
+        ));
+        assert!(!LspServerProcess::server_supports_text_document_save(
+            &capabilities
+        ));
+
+        capabilities.text_document_sync =
+            Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL));
+        assert!(LspServerProcess::server_supports_text_document_open_close(
+            &capabilities
+        ));
+        assert!(LspServerProcess::server_supports_text_document_change(
+            &capabilities
+        ));
+        assert!(!LspServerProcess::server_supports_text_document_save(
+            &capabilities
+        ));
+
+        capabilities.text_document_sync = Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::FULL),
+                save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                ..TextDocumentSyncOptions::default()
+            },
+        ));
+        assert!(LspServerProcess::server_supports_text_document_open_close(
+            &capabilities
+        ));
+        assert!(LspServerProcess::server_supports_text_document_change(
+            &capabilities
+        ));
+        assert!(LspServerProcess::server_supports_text_document_save(
+            &capabilities
+        ));
+    }
+
+    #[test]
+    fn workspace_file_notifications_require_server_file_operation_capabilities() {
+        let mut capabilities = ServerCapabilities::default();
+
+        assert!(!LspServerProcess::server_supports_workspace_did_create_files(&capabilities));
+        assert!(!LspServerProcess::server_supports_workspace_did_rename_files(&capabilities));
+
+        capabilities.workspace = Some(WorkspaceServerCapabilities {
+            file_operations: Some(WorkspaceFileOperationsServerCapabilities {
+                did_create: Some(FileOperationRegistrationOptions { filters: vec![] }),
+                did_rename: Some(FileOperationRegistrationOptions { filters: vec![] }),
+                ..WorkspaceFileOperationsServerCapabilities::default()
+            }),
+            ..WorkspaceServerCapabilities::default()
+        });
+
+        assert!(LspServerProcess::server_supports_workspace_did_create_files(&capabilities));
+        assert!(LspServerProcess::server_supports_workspace_did_rename_files(&capabilities));
+    }
 
     #[test]
     fn lsp_should_shutdown_after_too_many_consecutive_errors() -> anyhow::Result<()> {
