@@ -1612,6 +1612,44 @@ fn insert_mode_typing_after_moving_inserts_at_new_position() -> anyhow::Result<(
 }
 
 #[test]
+fn insert_mode_delete_key_deletes_forward() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent("abcd".to_string())),
+            Editor(MatchLiteral("b".to_string())),
+            Editor(EnterInsertMode(Direction::End)),
+            App(HandleKeyEvent(key!("delete"))),
+            Expect(CurrentComponentContent("abd")),
+            Expect(CurrentMode(Mode::Insert)),
+        ])
+    })
+}
+
+#[test]
+fn insert_mode_delete_key_at_end_is_noop() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent("abcd".to_string())),
+            Editor(MatchLiteral("d".to_string())),
+            Editor(EnterInsertMode(Direction::End)),
+            App(HandleKeyEvent(key!("delete"))),
+            Expect(CurrentComponentContent("abcd")),
+            Expect(CurrentMode(Mode::Insert)),
+        ])
+    })
+}
+
+#[test]
 fn delete_extended_selection() -> anyhow::Result<()> {
     execute_test(|s| {
         Box::new([

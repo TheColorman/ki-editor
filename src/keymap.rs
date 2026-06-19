@@ -1223,6 +1223,11 @@ pub fn insert_mode_keymap_legend_config(include_universal_keymap: bool) -> Keyma
                     Dispatch::ToEditor(Backspace),
                 ),
                 Keybinding::new_undocumented(
+                    key!("delete"),
+                    "Delete character forward",
+                    Dispatch::ToEditor(DeleteForward),
+                ),
+                Keybinding::new_undocumented(
                     key!("enter"),
                     "Enter new line",
                     Dispatch::ToEditor(EnterNewline),
