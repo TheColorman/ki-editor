@@ -54,7 +54,7 @@ impl Multibuffer {
 
     fn reveal(&self) -> Reveal {
         match self {
-            Multibuffer::GlobalReveal(_) => Reveal::CurrentSelectionMode,
+            Multibuffer::GlobalReveal(global_reveal) => global_reveal.reveal.clone(),
             Multibuffer::GlobalMulticursor(_) => Reveal::Cursor,
         }
     }

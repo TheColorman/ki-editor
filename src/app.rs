@@ -1362,6 +1362,7 @@ impl<T: Frontend> App<T> {
                 self.filter_cursor_matching_search(search, maintain)?;
             }
             Dispatch::ToggleRevealSelections => self.toggle_reveal_selections()?,
+            Dispatch::ToggleRevealMarks => self.toggle_reveal_marks()?,
             Dispatch::SaveFile => self.save()?,
             Dispatch::ReplaceWithPattern => {
                 // When a global search is active — whether still shown as a quickfix list, or
@@ -4236,6 +4237,7 @@ pub enum Dispatch {
         maintain: bool,
     },
     ToggleRevealSelections,
+    ToggleRevealMarks,
     SaveFile,
     ReplaceWithPattern,
 }
