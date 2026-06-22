@@ -435,11 +435,7 @@ pub fn space_keymap_legend_config(editor: &Editor, context: &Context) -> KeymapL
                     "÷ Cursor",
                     Dispatch::ToEditor(DispatchEditor::ToggleReveal(Reveal::Cursor)),
                 ),
-                Keybinding::new_undocumented(
-                    key!("o"),
-                    "÷ Mark",
-                    Dispatch::ToEditor(DispatchEditor::ToggleReveal(Reveal::Mark)),
-                ),
+                Keybinding::new_undocumented(key!("o"), "÷ Mark", Dispatch::ToggleRevealMarks),
                 Keybinding::new_undocumented(
                     key!("j"),
                     "Editor",
