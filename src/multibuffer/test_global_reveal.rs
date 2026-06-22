@@ -3,9 +3,11 @@ use my_proc_macros::keys;
 
 use crate::{
     app::{Dimension, Dispatch::*, Scope},
-    components::editor::{DispatchEditor::*, IfCurrentNotFound, Movement},
+    buffer::BufferOwner,
+    components::editor::{Direction, DispatchEditor::*, IfCurrentNotFound, Movement},
     context::GlobalMode,
     grid::StyleKey,
+    selection::{CharIndex, SelectionMode},
     test_app::{execute_test, ExpectKind::*, Step::*},
 };
 
@@ -271,6 +273,265 @@ fn pressing_esc_should_not_exit_quickfix_mode_when_global_reveal_is_active(
             // After pressing Esc, expect the global mode to be None
             // because Global Reveal is no longer active.
             Expect(CurrentGlobalMode(None)),
+        ])
+    })
+}
+
+#[test]
+fn should_reveal_marks_across_files_without_quickfix_list() -> Result<(), anyhow::Error> {
+    execute_test(|s| {
+        Box::new([
+            App(TerminalDimensionChanged(Dimension {
+                width: 100,
+                height: 8,
+            })),
+            App(SetFileContent(s.foo_rs(), "// foo1\n// x".to_string())),
+            App(SetFileContent(s.main_rs(), "// bar1\n// y".to_string())),
+            App(OpenFile {
+                path: s.foo_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("foo1".to_string())),
+            App(ToggleSelectionMark),
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("bar1".to_string())),
+            App(ToggleSelectionMark),
+            App(ToggleRevealMarks),
+            Expect(AppGridContains("src/foo.rs")),
+            Expect(AppGridContains("// foo1")),
+            Expect(AppGridContains("src/main.rs")),
+            Expect(AppGridContains("ar1")),
+        ])
+    })
+}
+
+#[test]
+fn should_reveal_marks_from_other_files_when_current_file_has_no_marks() -> Result<(), anyhow::Error>
+{
+    execute_test(|s| {
+        Box::new([
+            App(TerminalDimensionChanged(Dimension {
+                width: 100,
+                height: 8,
+            })),
+            App(SetFileContent(s.foo_rs(), "// foo1\n// x".to_string())),
+            App(SetFileContent(s.main_rs(), "// bar1\n// y".to_string())),
+            App(OpenFile {
+                path: s.foo_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("foo1".to_string())),
+            App(ToggleSelectionMark),
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("bar1".to_string())),
+            App(ToggleRevealMarks),
+            Expect(AppGridContains("src/foo.rs")),
+            Expect(AppGridContains("// foo1")),
+            Expect(AppGridContains("src/main.rs")),
+            Expect(AppGridContains("ar1")),
+        ])
+    })
+}
+
+#[test]
+fn should_reveal_marks_from_other_files_after_current_file_mark_is_removed(
+) -> Result<(), anyhow::Error> {
+    execute_test(|s| {
+        Box::new([
+            App(TerminalDimensionChanged(Dimension {
+                width: 100,
+                height: 8,
+            })),
+            App(SetFileContent(s.foo_rs(), "// foo1\n// x".to_string())),
+            App(SetFileContent(s.main_rs(), "// bar1\n// y".to_string())),
+            App(OpenFile {
+                path: s.foo_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("foo1".to_string())),
+            App(ToggleSelectionMark),
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("bar1".to_string())),
+            App(ToggleSelectionMark),
+            App(ToggleSelectionMark),
+            App(ToggleRevealMarks),
+            Expect(AppGridContains("src/foo.rs")),
+            Expect(AppGridContains("// foo1")),
+            Expect(AppGridContains("src/main.rs")),
+            Expect(AppGridContains("ar1")),
+        ])
+    })
+}
+
+#[test]
+fn global_reveal_marks_should_survive_insert_mode_and_selection_mode_changes(
+) -> Result<(), anyhow::Error> {
+    execute_test(|s| {
+        Box::new([
+            App(TerminalDimensionChanged(Dimension {
+                width: 100,
+                height: 8,
+            })),
+            App(SetFileContent(s.foo_rs(), "// foo1\n// x".to_string())),
+            App(SetFileContent(s.main_rs(), "// bar1\n// y".to_string())),
+            App(OpenFile {
+                path: s.foo_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("foo1".to_string())),
+            App(ToggleSelectionMark),
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("bar1".to_string())),
+            App(ToggleSelectionMark),
+            App(ToggleRevealMarks),
+            Editor(EnterInsertMode(Direction::Start)),
+            Expect(AppGridContains("src/foo.rs")),
+            Expect(AppGridContains("// foo1")),
+            Expect(AppGridContains("src/main.rs")),
+            Expect(AppGridContains("ar1")),
+            Editor(SetSelectionMode(
+                IfCurrentNotFound::LookForward,
+                SelectionMode::Word,
+            )),
+            Expect(AppGridContains("src/foo.rs")),
+            Expect(AppGridContains("// foo1")),
+            Expect(AppGridContains("src/main.rs")),
+            Expect(AppGridContains("ar1")),
+        ])
+    })
+}
+
+#[test]
+fn global_reveal_marks_should_survive_save() -> Result<(), anyhow::Error> {
+    execute_test(|s| {
+        Box::new([
+            App(TerminalDimensionChanged(Dimension {
+                width: 100,
+                height: 8,
+            })),
+            App(SetFileContent(s.foo_rs(), "// foo1\n// x".to_string())),
+            App(SetFileContent(s.main_rs(), "// bar1\n// y".to_string())),
+            App(OpenFile {
+                path: s.foo_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("foo1".to_string())),
+            App(ToggleSelectionMark),
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("bar1".to_string())),
+            App(ToggleSelectionMark),
+            App(ToggleRevealMarks),
+            App(SaveFile),
+            Expect(AppGridContains("src/foo.rs")),
+            Expect(AppGridContains("// foo1")),
+            Expect(AppGridContains("src/main.rs")),
+            Expect(AppGridContains("ar1")),
+        ])
+    })
+}
+
+#[test]
+fn global_reveal_marks_should_ignore_stale_invalid_mark_ranges() -> Result<(), anyhow::Error> {
+    execute_test(|s| {
+        Box::new([
+            App(TerminalDimensionChanged(Dimension {
+                width: 100,
+                height: 8,
+            })),
+            App(SetFileContent(s.foo_rs(), "// foo1\n// x".to_string())),
+            App(SetFileContent(s.main_rs(), "// bar1\n// y".to_string())),
+            App(SetFileContent(s.hello_ts(), "hello".to_string())),
+            App(OpenFile {
+                path: s.foo_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("foo1".to_string())),
+            App(ToggleSelectionMark),
+            App(SaveMarks {
+                path: s.hello_ts(),
+                marks: [(CharIndex(100)..CharIndex(105)).into()].to_vec(),
+            }),
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("bar1".to_string())),
+            App(ToggleRevealMarks),
+            Expect(AppGridContains("src/foo.rs")),
+            Expect(AppGridContains("// foo1")),
+            Expect(AppGridContains("src/main.rs")),
+            Expect(AppGridContains("ar1")),
+            Expect(Not(Box::new(AppGridContains("src/hello.ts")))),
+            Expect(CurrentMarks(
+                [(s.foo_rs(), [(CharIndex(3)..CharIndex(7)).into()].to_vec())].to_vec(),
+            )),
+        ])
+    })
+}
+
+#[test]
+fn global_reveal_marks_should_keep_active_split_after_mark_is_removed() -> Result<(), anyhow::Error>
+{
+    execute_test(|s| {
+        Box::new([
+            App(TerminalDimensionChanged(Dimension {
+                width: 100,
+                height: 8,
+            })),
+            App(SetFileContent(s.foo_rs(), "// foo1\n// x".to_string())),
+            App(SetFileContent(s.main_rs(), "// bar1\n// y".to_string())),
+            App(OpenFile {
+                path: s.foo_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("foo1".to_string())),
+            App(ToggleSelectionMark),
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("bar1".to_string())),
+            App(ToggleRevealMarks),
+            App(OpenFile {
+                path: s.foo_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            App(ToggleSelectionMark),
+            Expect(CurrentMarks([].to_vec())),
+            Expect(AppGridContains("src/foo.rs")),
+            Expect(AppGridContains("oo1")),
+            Expect(AppGridContains("src/main.rs")),
+            Expect(AppGridContains("ar1")),
         ])
     })
 }

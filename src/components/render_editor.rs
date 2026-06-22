@@ -544,6 +544,7 @@ impl Editor {
                                     .set_is_protected_range_start(true)
                                     .set_is_cursor(
                                         focused
+                                            && show_cursors
                                             && primary_cursor_char_index == protected_char_index,
                                     )
                             })

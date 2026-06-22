@@ -384,7 +384,12 @@ impl<T: Frontend> App<T> {
 
     pub fn save(&mut self) -> anyhow::Result<()> {
         self.handle_dispatch_editor(DispatchEditor::Save)?;
-        self.multibuffer.take();
+        if matches!(
+            self.multibuffer.as_ref(),
+            Some(Multibuffer::GlobalMulticursor(_))
+        ) {
+            self.multibuffer.take();
+        }
         Ok(())
     }
 
