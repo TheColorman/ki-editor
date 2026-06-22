@@ -104,6 +104,7 @@ impl Context {
                     marks: self
                         .marks
                         .iter()
+                        .filter(|(_, marks)| !marks.is_empty())
                         .map(|(path, marks)| (path.to_path_buf().clone(), marks.clone()))
                         .collect(),
                     prompt_histories: self.prompt_histories.clone(),
@@ -126,24 +127,30 @@ impl Context {
 
         self.marks = std::mem::take(&mut self.marks)
             .into_iter()
-            .map(|(p, marks)| {
+            .filter_map(|(p, marks)| {
                 if p == path {
-                    (
-                        p,
-                        marks
-                            .into_iter()
-                            .filter_map(|mark| {
-                                edits
-                                    .iter()
-                                    .try_fold(mark, |mark, edit| mark.apply_edit(edit))
-                            })
-                            .collect(),
-                    )
+                    let marks = marks
+                        .into_iter()
+                        .filter_map(|mark| {
+                            edits
+                                .iter()
+                                .try_fold(mark, |mark, edit| mark.apply_edit(edit))
+                        })
+                        .collect_vec();
+                    (!marks.is_empty()).then_some((p, marks))
                 } else {
-                    (p, marks)
+                    (!marks.is_empty()).then_some((p, marks))
                 }
             })
             .collect();
+    }
+
+    pub fn set_marks(&mut self, path: AbsolutePath, marks: Vec<CharIndexRange>) {
+        if marks.is_empty() {
+            self.marks.remove(&path);
+        } else {
+            self.marks.insert(path, marks);
+        }
     }
 
     pub fn save_marks(&mut self, path: AbsolutePath, marks: Vec<CharIndexRange>) {
@@ -159,7 +166,7 @@ impl Context {
 
         // We take the symmetric difference between the old ranges and the new ranges
         // so that user can unmark existing mark
-        self.marks.insert(
+        self.set_marks(
             path,
             new_ranges
                 .symmetric_difference(&old_ranges)
