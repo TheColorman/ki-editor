@@ -73,6 +73,7 @@ pub fn vscode_light() -> Theme {
         },
         diagnostic: DiagnosticStyles::default(),
         hunk: super::HunkStyles::light(),
+        jj_conflict: super::JjConflictStyles::light(),
         git_gutter: GitGutterStyles::default(),
     }
 }

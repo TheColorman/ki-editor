@@ -264,6 +264,11 @@ pub(super) fn from_theme_content(theme: ThemeContent) -> Theme {
         } else {
             super::HunkStyles::dark()
         },
+        jj_conflict: if theme.appearance == AppearanceContent::Light {
+            super::JjConflictStyles::light()
+        } else {
+            super::JjConflictStyles::dark()
+        },
         git_gutter: GitGutterStyles::default(),
     }
 }
