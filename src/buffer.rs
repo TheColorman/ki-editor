@@ -82,6 +82,7 @@ struct CachedHunks {
 #[derive(Debug, Clone)]
 struct CachedJjConflicts {
     lines: Vec<crate::jj_conflict::JjConflictLine>,
+    conflicts: Vec<crate::jj_conflict::JjConflict>,
     content_revision: usize,
 }
 
@@ -230,11 +231,32 @@ impl Buffer {
         drop(cached);
 
         let lines = crate::jj_conflict::lines_from_rope(&self.rope);
+        let conflicts = crate::jj_conflict::conflicts_from_rope(&self.rope);
         *self.cached_jj_conflicts.borrow_mut() = Some(CachedJjConflicts {
             lines: lines.clone(),
+            conflicts,
             content_revision: self.content_revision,
         });
         lines
+    }
+
+    pub fn jj_conflicts(&self) -> Vec<crate::jj_conflict::JjConflict> {
+        let cached = self.cached_jj_conflicts.borrow();
+        if let Some(cached) = cached.as_ref() {
+            if cached.content_revision == self.content_revision {
+                return cached.conflicts.clone();
+            }
+        }
+        drop(cached);
+
+        let lines = crate::jj_conflict::lines_from_rope(&self.rope);
+        let conflicts = crate::jj_conflict::conflicts_from_rope(&self.rope);
+        *self.cached_jj_conflicts.borrow_mut() = Some(CachedJjConflicts {
+            lines,
+            conflicts: conflicts.clone(),
+            content_revision: self.content_revision,
+        });
+        conflicts
     }
 
     pub fn set_diagnostics(&mut self, diagnostics: Vec<lsp_types::Diagnostic>) {

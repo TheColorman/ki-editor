@@ -94,6 +94,104 @@ fn toggle_visual_mode() -> anyhow::Result<()> {
 }
 
 #[test]
+fn accept_jj_conflict_snapshot_section() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent(
+                [
+                    "before",
+                    "<<<<<<< conflict 1 of 1",
+                    "%%%%%%% diff from: base",
+                    "\\\\\\\\\\\\\\        to: side-a",
+                    " old",
+                    "-old",
+                    "+new",
+                    "+++++++ side-b",
+                    "snapshot",
+                    ">>>>>>> conflict 1 of 1 ends",
+                    "after",
+                ]
+                .join("\n"),
+            )),
+            Editor(MatchLiteral("snapshot".to_string())),
+            Editor(AcceptJjConflictSection),
+            Expect(CurrentComponentContent("before\nsnapshot\nafter")),
+            Editor(CoarseUndo),
+            Expect(CurrentComponentContent(
+                "before\n<<<<<<< conflict 1 of 1\n%%%%%%% diff from: base\n\\\\\\\\\\\\\\        to: side-a\n old\n-old\n+new\n+++++++ side-b\nsnapshot\n>>>>>>> conflict 1 of 1 ends\nafter",
+            )),
+            Editor(CoarseRedo),
+            Expect(CurrentComponentContent("before\nsnapshot\nafter")),
+        ])
+    })
+}
+
+#[test]
+fn accept_jj_conflict_diff_section_materializes_diff() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent(
+                [
+                    "before",
+                    "<<<<<<< conflict 1 of 1",
+                    "%%%%%%% diff from: base",
+                    "\\\\\\\\\\\\\\        to: side-a",
+                    " context",
+                    "-old",
+                    "+new",
+                    "+++++++ side-b",
+                    "snapshot",
+                    ">>>>>>> conflict 1 of 1 ends",
+                    "after",
+                ]
+                .join("\n"),
+            )),
+            Editor(MatchLiteral("old".to_string())),
+            Editor(AcceptJjConflictSection),
+            Expect(CurrentComponentContent("before\ncontext\nnew\nafter")),
+        ])
+    })
+}
+
+#[test]
+fn space_h_accepts_jj_conflict_section() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent(
+                [
+                    "<<<<<<< conflict 1 of 1",
+                    "%%%%%%% diff from: base",
+                    "\\\\\\\\\\\\\\        to: side-a",
+                    " context",
+                    "+++++++ side-b",
+                    "snapshot",
+                    ">>>>>>> conflict 1 of 1 ends",
+                ]
+                .join("\n"),
+            )),
+            Editor(MatchLiteral("snapshot".to_string())),
+            App(HandleKeyEvents(keys!("space l h").to_vec())),
+            Expect(CurrentComponentContent("snapshot")),
+        ])
+    })
+}
+
+#[test]
 /// Kill means delete until the next selection
 fn delete_should_kill_if_possible_1() -> anyhow::Result<()> {
     execute_test(|s| {
