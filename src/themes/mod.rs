@@ -22,6 +22,7 @@ pub struct Theme {
     pub ui: UiStyles,
     pub diagnostic: DiagnosticStyles,
     pub hunk: HunkStyles,
+    pub jj_conflict: JjConflictStyles,
     pub git_gutter: GitGutterStyles,
 }
 
@@ -61,6 +62,35 @@ impl HunkStyles {
             old_background: hex!("#FCECEA"),
             old_emphasized_background: hex!("#F9D8D6"),
             new_emphasized_background: hex!("#BAF0C0"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct JjConflictStyles {
+    pub marker: Style,
+    pub diff_background: Color,
+    pub snapshot_background: Color,
+}
+
+impl JjConflictStyles {
+    pub fn dark() -> Self {
+        Self {
+            marker: Style::new()
+                .background_color(hex!("#4A3B16"))
+                .foreground_color(hex!("#FFD866")),
+            diff_background: hex!("#252A33"),
+            snapshot_background: hex!("#2B2433"),
+        }
+    }
+
+    pub fn light() -> Self {
+        Self {
+            marker: Style::new()
+                .background_color(hex!("#FFF4CE"))
+                .foreground_color(hex!("#7A5200")),
+            diff_background: hex!("#EEF4FF"),
+            snapshot_background: hex!("#F6F0FF"),
         }
     }
 }
@@ -119,6 +149,13 @@ impl Theme {
             }
             StyleKey::HunkNewEmphasized => {
                 Style::new().background_color(self.hunk.new_emphasized_background)
+            }
+            StyleKey::JjConflictMarker => self.jj_conflict.marker,
+            StyleKey::JjConflictDiff => {
+                Style::new().background_color(self.jj_conflict.diff_background)
+            }
+            StyleKey::JjConflictSnapshot => {
+                Style::new().background_color(self.jj_conflict.snapshot_background)
             }
             StyleKey::Syntax(highlight_group) => highlight_group
                 .to_highlight_name()

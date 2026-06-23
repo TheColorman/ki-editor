@@ -73,6 +73,7 @@ pub fn very_dark() -> Theme {
         },
         diagnostic: DiagnosticStyles::default(),
         hunk: super::HunkStyles::dark(),
+        jj_conflict: super::JjConflictStyles::dark(),
         git_gutter: GitGutterStyles::default(),
     }
 }

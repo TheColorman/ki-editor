@@ -26,9 +26,9 @@ use regex::Regex;
 use ropey::Rope;
 use shared::process_command::SpawnCommandError;
 use shared::{absolute_path::AbsolutePath, language::Language};
-use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
+use std::{cell::RefCell, ops::Range};
 use tree_sitter::{Node, Parser, Tree};
 #[cfg(test)]
 use tree_sitter_traversal2::{traverse, Order};
@@ -63,6 +63,8 @@ pub struct Buffer {
 
     /// We need to cache this because its computation is expensive.
     cached_hunks: Option<CachedHunks>,
+    cached_jj_conflicts: RefCell<Option<CachedJjConflicts>>,
+    content_revision: usize,
 
     /// Timestamp of the file when we last read/wrote it
     last_synced_time: Option<SystemTime>,
@@ -75,6 +77,12 @@ pub struct Buffer {
 struct CachedHunks {
     hunks: Vec<SimpleHunk>,
     file_content: Rope,
+}
+
+#[derive(Debug, Clone)]
+struct CachedJjConflicts {
+    lines: Vec<crate::jj_conflict::JjConflictLine>,
+    content_revision: usize,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -117,6 +125,8 @@ impl Buffer {
             redo_stack: Vec::default(),
             batch_id: SyntaxHighlightRequestBatchId::default(),
             cached_hunks: None,
+            cached_jj_conflicts: RefCell::new(None),
+            content_revision: 0,
             last_synced_time: None,
             #[cfg(test)]
             tree_reparsed_count: 0,
@@ -208,6 +218,23 @@ impl Buffer {
                 }
             }
         })
+    }
+
+    pub fn jj_conflict_lines(&self) -> Vec<crate::jj_conflict::JjConflictLine> {
+        let cached = self.cached_jj_conflicts.borrow();
+        if let Some(cached) = cached.as_ref() {
+            if cached.content_revision == self.content_revision {
+                return cached.lines.clone();
+            }
+        }
+        drop(cached);
+
+        let lines = crate::jj_conflict::lines_from_rope(&self.rope);
+        *self.cached_jj_conflicts.borrow_mut() = Some(CachedJjConflicts {
+            lines: lines.clone(),
+            content_revision: self.content_revision,
+        });
+        lines
     }
 
     pub fn set_diagnostics(&mut self, diagnostics: Vec<lsp_types::Diagnostic>) {
@@ -356,6 +383,7 @@ impl Buffer {
 
     pub fn update(&mut self, text: &str) -> Dispatches {
         (self.rope, self.tree) = Self::get_rope_and_tree(self.treesitter_language.clone(), text);
+        self.content_revision = self.content_revision.wrapping_add(1);
         self.flag_as_modified()
     }
 
@@ -669,6 +697,7 @@ impl Buffer {
         self.rope.try_remove(edit.range.start.0..edit.end().0)?;
         self.rope
             .try_insert(edit.range.start.0, edit.new.to_string().as_str())?;
+        self.content_revision = self.content_revision.wrapping_add(1);
 
         let dispatches = self.flag_as_modified();
 
