@@ -29,6 +29,33 @@ pub struct JjConflictLine {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JjConflictSectionKind {
+    Diff,
+    Snapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JjConflictSection {
+    pub kind: JjConflictSectionKind,
+    pub marker_line: usize,
+    pub body_line_range: std::ops::Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JjConflict {
+    pub line_range: std::ops::Range<usize>,
+    pub sections: Vec<JjConflictSection>,
+}
+
+impl JjConflict {
+    pub fn section_containing_line(&self, line_index: usize) -> Option<&JjConflictSection> {
+        self.sections
+            .iter()
+            .find(|section| section.body_line_range.contains(&line_index))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     Diff,
     Snapshot,
@@ -45,6 +72,71 @@ pub fn lines_from_rope(rope: &Rope) -> Vec<JjConflictLine> {
             .enumerate()
             .map(|(line_index, line)| (line_index, line.to_string())),
     )
+}
+
+pub fn conflicts_from_rope(rope: &Rope) -> Vec<JjConflict> {
+    conflicts_iter(
+        rope.lines()
+            .enumerate()
+            .map(|(line_index, line)| (line_index, line.to_string())),
+    )
+}
+
+fn conflicts_iter(lines: impl IntoIterator<Item = (usize, impl AsRef<str>)>) -> Vec<JjConflict> {
+    let mut conflicts = Vec::new();
+    let mut current_conflict: Option<JjConflict> = None;
+    let mut current_section: Option<JjConflictSection> = None;
+
+    for (line_index, line) in lines {
+        let line = line.as_ref().trim_end_matches(['\r', '\n']);
+
+        if is_marker(line, '<') {
+            current_conflict = Some(JjConflict {
+                line_range: line_index..line_index + 1,
+                sections: Vec::new(),
+            });
+            current_section = None;
+            continue;
+        }
+
+        let Some(conflict) = current_conflict.as_mut() else {
+            continue;
+        };
+
+        if is_marker(line, '>') {
+            if let Some(mut section) = current_section.take() {
+                section.body_line_range.end = line_index;
+                conflict.sections.push(section);
+            }
+            conflict.line_range.end = line_index + 1;
+            if let Some(conflict) = current_conflict.take() {
+                conflicts.push(conflict);
+            }
+            continue;
+        }
+
+        let section_kind = if is_marker(line, '%') || is_marker(line, '\\') {
+            Some(JjConflictSectionKind::Diff)
+        } else if is_marker(line, '+') || is_marker(line, '-') {
+            Some(JjConflictSectionKind::Snapshot)
+        } else {
+            None
+        };
+
+        if let Some(kind) = section_kind {
+            if let Some(mut section) = current_section.take() {
+                section.body_line_range.end = line_index;
+                conflict.sections.push(section);
+            }
+            current_section = Some(JjConflictSection {
+                kind,
+                marker_line: line_index,
+                body_line_range: line_index + 1..line_index + 1,
+            });
+        }
+    }
+
+    conflicts
 }
 
 fn lines_iter(lines: impl IntoIterator<Item = (usize, impl AsRef<str>)>) -> Vec<JjConflictLine> {
