@@ -396,6 +396,7 @@ impl Component for Editor {
                 return self.repeat_search(context, scope, if_current_not_found, prior_change)
             }
             RevertHunk(diff_mode) => return self.revert_hunk(context, diff_mode),
+            AcceptJjConflictSection => return self.accept_jj_conflict_section(context),
             GitBlame => return self.git_blame(context),
             ReloadFile { force } => return self.reload(context, force),
             MergeContent {
@@ -4508,6 +4509,68 @@ impl Editor {
         self.apply_edit_transaction(edit_transaction, context)
     }
 
+    fn accept_jj_conflict_section(&mut self, context: &Context) -> anyhow::Result<Dispatches> {
+        let buffer = self.buffer();
+        let cursor_line = buffer.char_to_line(
+            self.selection_set
+                .primary_selection()
+                .range()
+                .as_char_index(&self.cursor_direction),
+        )?;
+        let Some((conflict, section)) = buffer.jj_conflicts().into_iter().find_map(|conflict| {
+            let section = conflict.section_containing_line(cursor_line)?.clone();
+            Some((conflict, section))
+        }) else {
+            return Ok(Dispatches::default());
+        };
+
+        let mut replacement = match section.kind {
+            crate::jj_conflict::JjConflictSectionKind::Snapshot => buffer
+                .get_line_by_line_range(section.body_line_range.clone())?
+                .into_iter()
+                .join(""),
+            crate::jj_conflict::JjConflictSectionKind::Diff => buffer
+                .get_line_by_line_range(section.body_line_range.clone())?
+                .into_iter()
+                .filter_map(|line| {
+                    if line.starts_with('-') {
+                        None
+                    } else if line.is_empty() {
+                        Some(line)
+                    } else {
+                        Some(line.chars().skip(1).collect::<String>())
+                    }
+                })
+                .join(""),
+        };
+        let conflict_ends_at_eof = conflict.line_range.end >= buffer.len_lines();
+        let buffer_ends_with_newline = buffer
+            .len_chars()
+            .checked_sub(1)
+            .and_then(|index| buffer.rope().get_char(index))
+            == Some('\n');
+        if conflict_ends_at_eof && !buffer_ends_with_newline && replacement.ends_with('\n') {
+            replacement.pop();
+        }
+
+        let edit_range = buffer.line_range_to_char_index_range(&conflict.line_range)?;
+        let replacement: Rope = replacement.into();
+        let select_range = (edit_range.start..edit_range.start + replacement.len_chars()).into();
+        let edit_transaction = EditTransaction::from_action_groups(
+            [ActionGroup::new(
+                [
+                    Action::Edit(Edit::new(buffer.rope(), edit_range, replacement)),
+                    Action::Select(Selection::new(select_range)),
+                ]
+                .to_vec(),
+            )]
+            .to_vec(),
+        );
+        drop(buffer);
+
+        self.apply_edit_transaction(edit_transaction, context)
+    }
+
     fn git_blame(&self, context: &Context) -> Result<Dispatches, anyhow::Error> {
         let Some(file_path) = self.buffer().path() else {
             return Ok(Dispatches::default());
@@ -5208,6 +5271,7 @@ pub enum DispatchEditor {
     ToggleBlockComment,
     RepeatSearch(Scope, IfCurrentNotFound, Option<PriorChange>),
     RevertHunk(DiffMode),
+    AcceptJjConflictSection,
     GitBlame,
     ReloadFile {
         force: bool,

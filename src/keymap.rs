@@ -560,6 +560,11 @@ pub fn space_context_keymap_legend_config(editor: &Editor) -> KeymapLegendConfig
                 )),
             ),
             Keybinding::new_undocumented(
+                key!("h"),
+                "Accept JJ Conflict",
+                Dispatch::ToEditor(DispatchEditor::AcceptJjConflictSection),
+            ),
+            Keybinding::new_undocumented(
                 key!("b"),
                 "Git Blame",
                 Dispatch::ToEditor(DispatchEditor::GitBlame),
