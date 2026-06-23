@@ -64,6 +64,7 @@ pub struct Buffer {
 
     /// We need to cache this because its computation is expensive.
     cached_hunks: Option<CachedHunks>,
+    cached_jj_conflicts: RefCell<Option<CachedJjConflicts>>,
     cached_injected_syntax_trees: RefCell<Option<CachedInjectedSyntaxTrees>>,
     content_revision: usize,
 
@@ -78,6 +79,12 @@ pub struct Buffer {
 struct CachedHunks {
     hunks: Vec<SimpleHunk>,
     file_content: Rope,
+}
+
+#[derive(Debug, Clone)]
+struct CachedJjConflicts {
+    lines: Vec<crate::jj_conflict::JjConflictLine>,
+    content_revision: usize,
 }
 
 #[derive(Clone)]
@@ -184,6 +191,7 @@ impl Buffer {
             redo_stack: Vec::default(),
             batch_id: SyntaxHighlightRequestBatchId::default(),
             cached_hunks: None,
+            cached_jj_conflicts: RefCell::new(None),
             cached_injected_syntax_trees: RefCell::new(None),
             content_revision: 0,
             last_synced_time: None,
@@ -277,6 +285,23 @@ impl Buffer {
                 }
             }
         })
+    }
+
+    pub fn jj_conflict_lines(&self) -> Vec<crate::jj_conflict::JjConflictLine> {
+        let cached = self.cached_jj_conflicts.borrow();
+        if let Some(cached) = cached.as_ref() {
+            if cached.content_revision == self.content_revision {
+                return cached.lines.clone();
+            }
+        }
+        drop(cached);
+
+        let lines = crate::jj_conflict::lines_from_rope(&self.rope);
+        *self.cached_jj_conflicts.borrow_mut() = Some(CachedJjConflicts {
+            lines: lines.clone(),
+            content_revision: self.content_revision,
+        });
+        lines
     }
 
     pub fn set_diagnostics(&mut self, source: String, diagnostics: Vec<lsp_types::Diagnostic>) {

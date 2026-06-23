@@ -17,7 +17,7 @@ use crate::{
     divide_viewport::{calculate_window_position, divide_viewport},
     format_path_list::get_formatted_paths,
     git::hunk::SimpleHunk,
-    grid::{CellUpdate, Grid, RenderContentLineNumber, StyleKey},
+    grid::{CellUpdate, Grid, RenderContentLineNumber, StyleKey, LINE_NUMBER_VERTICAL_BORDER},
     position::Position,
     quickfix_list::QuickfixListItem,
     selection::{CharIndex, Selection},
@@ -528,7 +528,7 @@ impl Editor {
 
         let grid = {
             let visible_lines_updates = {
-                let boundaries = [Boundary::new(&buffer, visible_line_range)];
+                let boundaries = [Boundary::new(&buffer, visible_line_range.clone())];
                 remaining_highlight_spans
                     .into_iter()
                     .flat_map(|span| span.into_cell_updates(&buffer, theme, &boundaries).0)
@@ -587,6 +587,70 @@ impl Editor {
                 hunks,
                 default_style_key,
             );
+            let visible_jj_conflict_lines = buffer
+                .jj_conflict_lines()
+                .into_iter()
+                .filter(|line| visible_line_range.contains(&line.line_index))
+                .collect_vec();
+            let visible_lines_grid = if visible_jj_conflict_lines.is_empty() {
+                visible_lines_grid
+            } else {
+                let line_number_width = if render_line_number {
+                    len_lines.max(1).to_string().len() + LINE_NUMBER_VERTICAL_BORDER.chars().count()
+                } else {
+                    0
+                };
+                let wrapped_lines = crate::soft_wrap::soft_wrap(
+                    &visible_lines_content,
+                    width.saturating_sub(line_number_width),
+                );
+                let rendered_line_ranges = wrapped_lines
+                    .lines()
+                    .iter()
+                    .scan(0, |rendered_line, line| {
+                        let start = *rendered_line;
+                        let end = start + line.lines().len();
+                        *rendered_line = end;
+                        Some((scroll_offset + line.line_number(), start..end))
+                    })
+                    .collect_vec();
+                let mut jj_conflict_updates = Vec::new();
+
+                for line in visible_jj_conflict_lines {
+                    let Some((_, rendered_line_range)) = rendered_line_ranges
+                        .iter()
+                        .find(|(line_index, _)| *line_index == line.line_index)
+                    else {
+                        continue;
+                    };
+
+                    let style_key = line.kind.style_key();
+                    let style = theme.get_style(&style_key);
+                    for rendered_line in rendered_line_range.clone() {
+                        for column in line_number_width..width {
+                            let source = visible_lines_grid
+                                .rows
+                                .get(rendered_line)
+                                .and_then(|row| row.get(column))
+                                .and_then(|cell| cell.source.as_ref());
+                            let can_update = matches!(
+                                source,
+                                None | Some(StyleKey::Default) | Some(StyleKey::Syntax(_))
+                            );
+                            if can_update {
+                                jj_conflict_updates.push(CellUpdate {
+                                    position: Position::new(rendered_line, column),
+                                    style,
+                                    source: Some(style_key.clone()),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                }
+
+                visible_lines_grid.apply_cell_updates(jj_conflict_updates)
+            };
             let protected_range = visible_lines_grid
                 .get_protected_range_start_position()
                 .map(|position| position.line..position.line + 1);

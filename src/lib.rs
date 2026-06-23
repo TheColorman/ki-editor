@@ -28,6 +28,7 @@ mod indent_query;
 mod integration_event;
 #[cfg(test)]
 mod integration_test;
+mod jj_conflict;
 pub mod keymap;
 mod keymap_override;
 mod layout;
