@@ -43,7 +43,6 @@ fn main() {
             )),
             WaitForAppMessage(lazy_regex::regex!("LspNotification.*Initialized")),
             WaitForAppMessage(lazy_regex::regex!("LspNotification.*PublishDiagnostics")),
-            WaitForAppMessage(lazy_regex::regex!("LspNotification.*PublishDiagnostics")),
             Editor(MatchLiteral("println".to_string())),
             Editor(SetSelectionMode(
                 IfCurrentNotFound::LookForward,
