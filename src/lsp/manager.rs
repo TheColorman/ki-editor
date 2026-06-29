@@ -1,15 +1,71 @@
-use std::collections::HashMap;
-
-use crate::app::AppMessage;
-
-use super::process::{FromEditor, LspNotification, LspServerProcessChannel};
-use shared::{
-    absolute_path::AbsolutePath,
-    language::{Language, LanguageId},
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
 };
 
+use crate::app::AppMessage;
+use crate::lsp::server_config::resolve_configured_path;
+
+use super::process::{FromEditor, LspNotification, LspServerProcessChannel};
+use shared::{absolute_path::AbsolutePath, language::Language};
+
+fn is_package_workspace_root(path: &Path) -> bool {
+    [
+        "pnpm-workspace.yaml",
+        "pnpm-workspace.yml",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "package-lock.json",
+        "bun.lockb",
+        "bun.lock",
+    ]
+    .into_iter()
+    .any(|marker| path.join(marker).exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lsp_root_prefers_nested_package_workspace_root() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let frontend = tempdir.path().join("frontends");
+        let app = frontend.join("apps/launch/app");
+        std::fs::create_dir_all(&app)?;
+        std::fs::write(frontend.join("pnpm-workspace.yaml"), "packages: []")?;
+        std::fs::write(app.join("app.vue"), "<template />")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let actual = manager.lsp_root_for_path(&app.join("app.vue").try_into()?);
+
+        assert_eq!(actual.as_ref(), frontend.as_path());
+        Ok(())
+    }
+
+    #[test]
+    fn lsp_root_treats_pnpm_lockfile_as_package_root() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let frontend = tempdir.path().join("frontends");
+        let app = frontend.join("apps/launch/app");
+        std::fs::create_dir_all(&app)?;
+        std::fs::write(frontend.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")?;
+        std::fs::write(app.join("app.vue"), "<template />")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let actual = manager.lsp_root_for_path(&app.join("app.vue").try_into()?);
+
+        assert_eq!(actual.as_ref(), frontend.as_path());
+        Ok(())
+    }
+}
+
 pub struct LspManager {
-    lsp_server_process_channels: HashMap<LanguageId, LspServerProcessChannel>,
+    lsp_server_process_channels: HashMap<String, LspServerProcessChannel>,
     sender: crossbeam_channel::Sender<AppMessage>,
     current_working_directory: AbsolutePath,
     #[cfg(test)]
@@ -20,7 +76,7 @@ pub struct LspManager {
 
     #[cfg(test)]
     /// Used for testing the correctness of initialization
-    lsp_server_initialized_args_history: Vec<(LanguageId, Vec<AbsolutePath>)>,
+    lsp_server_initialized_args_history: Vec<(String, Vec<AbsolutePath>)>,
 }
 
 impl Drop for LspManager {
@@ -45,16 +101,133 @@ impl LspManager {
         }
     }
 
+    fn server_key(language: &Language, server_id: &str) -> Option<String> {
+        Some(format!("{}:{server_id}", language.id()?))
+    }
+
+    fn lsp_root_for_path(&self, path: &AbsolutePath) -> AbsolutePath {
+        let file_parent = path.as_ref().parent().unwrap_or(path.as_ref());
+        let boundary = self.current_working_directory.as_ref();
+        let mut nearest_package_root = None::<PathBuf>;
+
+        for ancestor in file_parent.ancestors() {
+            if is_package_workspace_root(ancestor) {
+                return ancestor
+                    .try_into()
+                    .unwrap_or_else(|_| self.current_working_directory.clone());
+            }
+            if nearest_package_root.is_none() && ancestor.join("package.json").exists() {
+                nearest_package_root = Some(ancestor.to_path_buf());
+            }
+            if ancestor == boundary {
+                break;
+            }
+        }
+
+        nearest_package_root
+            .and_then(|path| path.as_path().try_into().ok())
+            .unwrap_or_else(|| self.current_working_directory.clone())
+    }
+
+    fn is_lifecycle_message(from_editor: &FromEditor) -> bool {
+        matches!(
+            from_editor,
+            FromEditor::TextDocumentDidOpen { .. }
+                | FromEditor::TextDocumentDidChange { .. }
+                | FromEditor::TextDocumentDidSave { .. }
+                | FromEditor::WorkspaceDidRenameFiles { .. }
+                | FromEditor::WorkspaceDidCreateFiles { .. }
+        )
+    }
+
+    fn warn_missing_configured_lsp_paths(
+        &self,
+        root: &AbsolutePath,
+        server_id: &str,
+        config: &shared::language::LspServerConfig,
+    ) {
+        let Some(options) = config.initialization_options() else {
+            return;
+        };
+
+        if let Some(tsdk) = options
+            .pointer("/typescript/tsdk")
+            .or_else(|| options.pointer("/typescript.tsdk"))
+            .and_then(|value| value.as_str())
+        {
+            let Some(resolved) = resolve_configured_path(root, tsdk) else {
+                log::warn!(
+                    "Unable to resolve configured TypeScript SDK placeholder {tsdk:?} for LSP server '{server_id}'"
+                );
+                return;
+            };
+            if !resolved.exists() {
+                log::warn!(
+                    "Configured LSP path for server '{server_id}' does not exist: typescript tsdk {tsdk:?} resolved to {}. If the server is installed/configured through Nix or another package manager, override this path in Ki config.",
+                    resolved.display()
+                );
+            }
+        }
+
+        if let Some(plugins) = options
+            .pointer("/vtsls/tsserver/globalPlugins")
+            .and_then(|value| value.as_array())
+        {
+            for plugin in plugins {
+                let Some(location) = plugin.get("location").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                let Some(resolved) = resolve_configured_path(root, location) else {
+                    let name = plugin
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("<unknown plugin>");
+                    log::warn!(
+                        "Unable to resolve configured LSP plugin placeholder for server '{server_id}': plugin {name:?} location {location:?}. If the plugin is provided by Nix or another package manager, override this location in Ki config."
+                    );
+                    continue;
+                };
+                if !resolved.exists() {
+                    let name = plugin
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("<unknown plugin>");
+                    log::warn!(
+                        "Configured LSP plugin path for server '{server_id}' does not exist: plugin {name:?} location {location:?} resolved to {}. If the plugin is provided by Nix or another package manager, override this location in Ki config.",
+                        resolved.display()
+                    );
+                }
+            }
+        }
+    }
+
     fn invoke_channels(
         &self,
         path: &AbsolutePath,
-        _error: &str,
+        from_editor: &FromEditor,
         f: impl Fn(&LspServerProcessChannel) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        crate::config::from_path(path)
-            .and_then(|language| self.lsp_server_process_channels.get(&language.id()?))
-            .map(f)
-            .unwrap_or_else(|| Ok(()))
+        let Some(language) = crate::config::from_path(path) else {
+            return Ok(());
+        };
+        let configs = language.lsp_server_configs();
+        let configs = if Self::is_lifecycle_message(from_editor) {
+            configs
+        } else {
+            configs
+                .into_iter()
+                .filter(|config| config.primary())
+                .collect()
+        };
+
+        for config in configs {
+            if let Some(channel) = Self::server_key(&language, config.id())
+                .and_then(|key| self.lsp_server_process_channels.get(&key))
+            {
+                f(channel)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn send_message(
@@ -66,11 +239,9 @@ impl LspManager {
         self.history
             .insert(from_editor.variant(), from_editor.clone());
 
-        self.invoke_channels(
-            &path,
-            &format!("Failed to send message '{}'", from_editor.variant()),
-            |channel| channel.send_from_editor(from_editor.clone()),
-        )
+        self.invoke_channels(&path, &from_editor, |channel| {
+            channel.send_from_editor(from_editor.clone())
+        })
     }
 
     /// Open file can do one of the following:
@@ -81,44 +252,68 @@ impl LspManager {
         let Some(language) = crate::config::from_path(&path) else {
             return Ok(());
         };
-        let Some(language_id) = language.id() else {
-            return Ok(());
-        };
 
-        if let Some(channel) = self.lsp_server_process_channels.get(&language_id) {
-            if channel.is_initialized() {
-                channel.document_did_open(path.clone())
-            } else {
-                Ok(())
-            }
-        } else {
-            LspServerProcessChannel::new(
-                language.clone(),
-                self.sender.clone(),
-                self.current_working_directory.clone(),
-            )
-            .map(|channel| {
-                if let Some(channel) = channel {
-                    self.lsp_server_process_channels
-                        .insert(language.id()?, channel);
+        for config in language.lsp_server_configs() {
+            let lsp_root = self.lsp_root_for_path(&path);
+            let Some(server_key) = Self::server_key(&language, config.id()) else {
+                continue;
+            };
+            if let Some(channel) = self.lsp_server_process_channels.get(&server_key) {
+                if channel.is_initialized() {
+                    channel.document_did_open(path.clone())?;
                 }
-                Some(())
-            })?;
-            Ok(())
+            } else {
+                let is_primary = config.primary();
+                let server_id = config.id().to_string();
+                let command = config.process_command().to_string();
+                self.warn_missing_configured_lsp_paths(&lsp_root, &server_id, &config);
+                match LspServerProcessChannel::new(
+                    language.clone(),
+                    config,
+                    self.sender.clone(),
+                    lsp_root.clone(),
+                ) {
+                    Ok(Some(channel)) => {
+                        log::info!(
+                            "Started LSP server '{server_id}' ({command}) for {path:?} with root {lsp_root:?}"
+                        );
+                        self.lsp_server_process_channels.insert(server_key, channel);
+                    }
+                    Ok(None) => {}
+                    Err(error) if is_primary => {
+                        log::error!(
+                            "Failed to start primary LSP server '{server_id}' ({command}) for {path:?}: {error:?}"
+                        );
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Failed to start secondary LSP server '{server_id}' ({command}) for {path:?}: {error:?}"
+                        );
+                    }
+                }
+            }
         }
+
+        Ok(())
     }
 
-    pub fn initialized(&mut self, language: Language, opened_documents: Vec<AbsolutePath>) {
-        let Some(language_id) = language.id() else {
+    pub fn initialized(
+        &mut self,
+        language: Language,
+        server_id: String,
+        opened_documents: Vec<AbsolutePath>,
+    ) {
+        let Some(server_key) = Self::server_key(&language, &server_id) else {
             return;
         };
 
         #[cfg(test)]
         self.lsp_server_initialized_args_history
-            .push((language_id.clone(), opened_documents.clone()));
+            .push((server_key.clone(), opened_documents.clone()));
 
         self.lsp_server_process_channels
-            .get_mut(&language_id)
+            .get_mut(&server_key)
             .map(|channel| {
                 channel.initialized();
                 channel.documents_did_open(opened_documents)
@@ -177,7 +372,7 @@ impl LspManager {
     }
 
     #[cfg(test)]
-    pub fn lsp_server_initialized_args(&self) -> Option<(LanguageId, Vec<AbsolutePath>)> {
+    pub fn lsp_server_initialized_args(&self) -> Option<(String, Vec<AbsolutePath>)> {
         self.lsp_server_initialized_args_history.last().cloned()
     }
 }

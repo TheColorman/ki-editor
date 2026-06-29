@@ -148,13 +148,13 @@ impl Command {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Language {
-    #[schemars(example = &["ts", "tsx"])]
     pub(crate) extensions: Vec<String>,
     /// For files without extensions.
-    #[schemars(example = &["Dockerfile"])]
     pub(crate) file_names: Vec<String>,
     pub(crate) lsp_language_id: Option<LanguageId>,
     pub(crate) lsp_command: Option<LspCommand>,
+    #[serde(default)]
+    pub(crate) lsp_servers: Vec<LspServerConfig>,
     pub(crate) tree_sitter_grammar_config: Option<GrammarConfig>,
     /// The formatter command will receive the content from STDIN
     /// and is expected to return the formatted output to STDOUT.
@@ -427,6 +427,36 @@ pub struct LspCommand {
     pub(crate) environment: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LspServerConfig {
+    pub(crate) id: String,
+    pub(crate) command: Command,
+    pub(crate) language_id: Option<LanguageId>,
+    pub(crate) initialization_options: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) environment: HashMap<String, String>,
+    #[serde(default)]
+    pub(crate) primary: bool,
+    #[serde(default = "default_true")]
+    pub(crate) diagnostics: bool,
+    #[serde(default)]
+    pub(crate) diagnostic_mode: LspDiagnosticMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LspDiagnosticMode {
+    #[default]
+    Push,
+    Pull,
+    Both,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
 impl Language {
     pub const fn new() -> Self {
         Self {
@@ -434,6 +464,7 @@ impl Language {
             file_names: Vec::new(),
             lsp_language_id: None,
             lsp_command: None,
+            lsp_servers: Vec::new(),
             tree_sitter_grammar_config: None,
             formatter: None,
             line_comment_prefix: None,
@@ -497,6 +528,7 @@ impl Language {
         let (lsp_language_id, lsp_language_id_error) =
             extract_field!(lsp_language_id, "lsp_language_id");
         let (lsp_command, lsp_command_error) = extract_field!(lsp_command, "lsp_command");
+        let (lsp_servers, lsp_servers_error) = extract_field!(lsp_servers, "lsp_servers");
         let (tree_sitter_grammar_config, tree_sitter_grammar_config_error) =
             extract_field!(tree_sitter_grammar_config, "tree_sitter_grammar_config");
         let (formatter, formatter_error) = extract_field!(formatter, "formatter");
@@ -510,6 +542,7 @@ impl Language {
             "file_names",
             "lsp_language_id",
             "lsp_command",
+            "lsp_servers",
             "tree_sitter_grammar_config",
             "formatter",
             "line_comment_prefix",
@@ -525,6 +558,7 @@ impl Language {
             file_names,
             lsp_language_id,
             lsp_command,
+            lsp_servers,
             tree_sitter_grammar_config,
             formatter,
             line_comment_prefix,
@@ -536,6 +570,7 @@ impl Language {
             .chain(file_names_error)
             .chain(lsp_language_id_error)
             .chain(lsp_command_error)
+            .chain(lsp_servers_error)
             .chain(tree_sitter_grammar_config_error)
             .chain(formatter_error)
             .chain(line_comment_prefix_error)
@@ -544,6 +579,53 @@ impl Language {
             .collect();
 
         (language, errors)
+    }
+}
+
+impl LspServerConfig {
+    pub fn new(id: &'static str, command: Command) -> Self {
+        Self {
+            id: id.to_string(),
+            command,
+            language_id: None,
+            initialization_options: None,
+            environment: HashMap::new(),
+            primary: true,
+            diagnostics: true,
+            diagnostic_mode: LspDiagnosticMode::Push,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn language_id(&self) -> Option<LanguageId> {
+        self.language_id.clone()
+    }
+
+    pub fn initialization_options(&self) -> Option<Value> {
+        self.initialization_options.clone()
+    }
+
+    pub fn primary(&self) -> bool {
+        self.primary
+    }
+
+    pub fn diagnostics(&self) -> bool {
+        self.diagnostics
+    }
+
+    pub fn diagnostic_mode(&self) -> LspDiagnosticMode {
+        self.diagnostic_mode
+    }
+
+    pub fn process_command(&self) -> ProcessCommand {
+        ProcessCommand::with_environment(
+            &self.command.command,
+            &self.command.arguments,
+            &self.environment,
+        )
     }
 }
 
@@ -579,6 +661,28 @@ impl Language {
 
     pub fn initialization_options(&self) -> Option<Value> {
         self.lsp_command.clone()?.initialization_options
+    }
+
+    pub fn lsp_server_configs(&self) -> Vec<LspServerConfig> {
+        if !self.lsp_servers.is_empty() {
+            return self.lsp_servers.clone();
+        }
+
+        self.lsp_command
+            .as_ref()
+            .map(|command| {
+                vec![LspServerConfig {
+                    id: "primary".to_string(),
+                    command: command.command.clone(),
+                    language_id: self.lsp_language_id.clone(),
+                    initialization_options: command.initialization_options.clone(),
+                    environment: command.environment.clone(),
+                    primary: true,
+                    diagnostics: true,
+                    diagnostic_mode: LspDiagnosticMode::Push,
+                }]
+            })
+            .unwrap_or_default()
     }
 
     pub fn tree_sitter_language(&self) -> Option<tree_sitter::Language> {

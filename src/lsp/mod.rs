@@ -9,6 +9,7 @@ pub mod manager;
 pub mod prepare_rename_response;
 pub mod process;
 mod progress_notification_manager;
+mod server_config;
 pub mod signature_help;
 pub mod symbols;
 pub mod workspace_edit;

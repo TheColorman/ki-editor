@@ -11,7 +11,7 @@ use lsp_types::request::{
 use lsp_types::*;
 use my_proc_macros::NamedVariant;
 use shared::absolute_path::AbsolutePath;
-use shared::language::Language;
+use shared::language::{Language, LspDiagnosticMode, LspServerConfig};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 
@@ -23,6 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::app::AppMessage;
+use crate::lsp::server_config::resolve_initialization_options;
 use crate::utils::consolidate_errors;
 
 use super::code_action::CodeAction;
@@ -46,8 +47,114 @@ macro_rules! lsp_error {
         log::error!("{{{}}} {}", $command, format_args!($($arg)*))
     };
 }
+
+fn diagnostics_from_document_diagnostic(
+    result: DocumentDiagnosticReportResult,
+) -> Option<Vec<lsp_types::Diagnostic>> {
+    match result {
+        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(report)) => {
+            Some(report.full_document_diagnostic_report.items)
+        }
+        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Unchanged(_)) => None,
+        DocumentDiagnosticReportResult::Partial(_) => None,
+    }
+}
+
+fn workspace_configuration_response(
+    params: ConfigurationParams,
+    root: &AbsolutePath,
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        params
+            .items
+            .into_iter()
+            .map(|item| configuration_value(item.section.as_deref(), root))
+            .collect(),
+    )
+}
+
+fn configuration_value(section: Option<&str>, root: &AbsolutePath) -> serde_json::Value {
+    let value = match section {
+        Some("") => serde_json::json!({
+            "typescript.tsdk": "${workspace}/node_modules/typescript/lib",
+            "typescript.validate.enable": true,
+            "javascript.validate.enable": true,
+            "vtsls": {
+                "tsserver": {
+                    "globalPlugins": [{
+                        "name": "@vue/typescript-plugin",
+                        "location": "${vue_typescript_plugin}",
+                        "languages": ["vue"],
+                        "enableForWorkspaceTypeScriptVersions": true
+                    }]
+                }
+            }
+        }),
+        Some("typescript") => serde_json::json!({
+            "tsdk": "${workspace}/node_modules/typescript/lib",
+            "validate": { "enable": true }
+        }),
+        Some("vtsls") => serde_json::json!({
+            "tsserver": {
+                "globalPlugins": [{
+                    "name": "@vue/typescript-plugin",
+                    "location": "${vue_typescript_plugin}",
+                    "languages": ["vue"],
+                    "enableForWorkspaceTypeScriptVersions": true
+                }]
+            }
+        }),
+        Some("eslint") => serde_json::json!({
+            "enable": true,
+            "run": "onType",
+            "validate": ["javascript", "javascriptreact", "typescript", "typescriptreact", "vue"],
+            "probe": ["javascript", "javascriptreact", "typescript", "typescriptreact", "vue"],
+            "workingDirectories": [{ "mode": "auto" }]
+        }),
+        Some("eslint.enable") => serde_json::json!(true),
+        Some("eslint.run") => serde_json::json!("onType"),
+        Some("eslint.validate") => serde_json::json!([
+            "javascript",
+            "javascriptreact",
+            "typescript",
+            "typescriptreact",
+            "vue"
+        ]),
+        Some("eslint.probe") => serde_json::json!([
+            "javascript",
+            "javascriptreact",
+            "typescript",
+            "typescriptreact",
+            "vue"
+        ]),
+        Some("eslint.workingDirectories") => serde_json::json!([{ "mode": "auto" }]),
+        _ => serde_json::Value::Null,
+    };
+
+    resolve_initialization_options(Some(value), root).unwrap_or(serde_json::Value::Null)
+}
+
+fn hint_for_lsp_error(message: &str) -> Option<&'static str> {
+    if message.contains("Cannot find provider for definition") {
+        Some(
+            "For .vue files with vtsls, ensure the Vue TypeScript plugin is installed and configured for the server you are running. If using Nix-managed vtsls, make sure @vue/typescript-plugin is also available to that vtsls instance, or override the Vue lsp_servers initialization_options in Ki config to point to the plugin location.",
+        )
+    } else if message.contains("The \"path\" argument must be of type string") {
+        Some(
+            "The ESLint server failed while resolving a file path. Check that the ESLint server, eslint package, parser/plugins, and working-directory/config setup match your project. If using a non-node_modules install, ensure the server can still resolve the project eslint package and vue parser.",
+        )
+    } else if message.contains("Cannot find module") || message.contains("Failed to load plugin") {
+        Some(
+            "This usually means the language server could not resolve a required project package or plugin. Check the server command environment and package/plugin install location.",
+        )
+    } else {
+        None
+    }
+}
+
 struct LspServerProcess {
     language: Language,
+    server_config: LspServerConfig,
     /// `None` once the shutdown sequence has closed the pipe to the LSP server,
     /// so that the server observes EOF on its stdin.
     stdin: Option<process::ChildStdin>,
@@ -91,8 +198,14 @@ struct PendingResponseRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LspNotification {
-    Initialized(Box<Language>),
-    PublishDiagnostics(PublishDiagnosticsParams),
+    Initialized {
+        language: Box<Language>,
+        server_id: String,
+    },
+    PublishDiagnostics {
+        server_id: String,
+        params: PublishDiagnosticsParams,
+    },
     Completion(ResponseContext, Completion),
     Hover(Hover),
     Definition(ResponseContext, GotoDefinitionResponse),
@@ -105,7 +218,9 @@ pub enum LspNotification {
     DocumentSymbols(Symbols),
     WorkspaceSymbols(Symbols),
     CompletionItemResolve(Box<lsp_types::CompletionItem>),
-    Progress { message: String },
+    Progress {
+        message: String,
+    },
     CallHierarchyIncomingCalls(ResponseContext, Vec<lsp_types::CallHierarchyIncomingCall>),
     CallHierarchyOutgoingCalls(ResponseContext, Vec<lsp_types::CallHierarchyOutgoingCall>),
 }
@@ -202,6 +317,7 @@ pub enum FromEditor {
 }
 
 impl FromEditor {
+    #[cfg(test)]
     pub fn variant(&self) -> &'static str {
         self.variant_name()
     }
@@ -209,6 +325,7 @@ impl FromEditor {
 
 pub struct LspServerProcessChannel {
     language: Language,
+    server_config: LspServerConfig,
     sender: Sender<LspServerProcessMessage>,
     is_initialized: bool,
 }
@@ -216,10 +333,16 @@ pub struct LspServerProcessChannel {
 impl LspServerProcessChannel {
     pub fn new(
         language: Language,
+        server_config: LspServerConfig,
         screen_message_sender: crossbeam_channel::Sender<AppMessage>,
         current_working_directory: AbsolutePath,
     ) -> Result<Option<LspServerProcessChannel>, anyhow::Error> {
-        LspServerProcess::start(language, screen_message_sender, current_working_directory)
+        LspServerProcess::start(
+            language,
+            server_config,
+            screen_message_sender,
+            current_working_directory,
+        )
     }
 
     /// Shuts down the underlying LSP server process and blocks until the outcome
@@ -263,7 +386,11 @@ impl LspServerProcessChannel {
 
     pub fn document_did_open(&self, path: AbsolutePath) -> Result<(), anyhow::Error> {
         let content = path.read()?;
-        let Some(language_id) = self.language.id() else {
+        let Some(language_id) = self
+            .server_config
+            .language_id()
+            .or_else(|| self.language.id())
+        else {
             return Ok(());
         };
         self.send(LspServerProcessMessage::FromEditor(
@@ -292,15 +419,13 @@ impl LspServerProcessChannel {
 impl LspServerProcess {
     fn start(
         language: Language,
+        server_config: LspServerConfig,
         app_message_sender: crossbeam_channel::Sender<AppMessage>,
         current_working_directory: AbsolutePath,
     ) -> anyhow::Result<Option<LspServerProcessChannel>> {
-        let process_command = match language.lsp_process_command() {
-            Some(result) => result,
-            None => return Ok(None),
-        };
+        let process_command = server_config.process_command();
 
-        let mut process = process_command.spawn()?;
+        let mut process = process_command.spawn_in_directory(current_working_directory.as_ref())?;
         let stdin = process
             .stdin
             .take()
@@ -318,6 +443,7 @@ impl LspServerProcess {
         let (sender, receiver) = std::sync::mpsc::channel::<LspServerProcessMessage>();
         let mut lsp_server_process = LspServerProcess {
             language: language.clone(),
+            server_config: server_config.clone(),
             stdin: Some(stdin),
             stdout: Some(stdout),
             stderr: Some(stderr),
@@ -353,6 +479,7 @@ impl LspServerProcess {
 
         Ok(Some(LspServerProcessChannel {
             language,
+            server_config,
             sender,
             is_initialized: false,
         }))
@@ -364,7 +491,10 @@ impl LspServerProcess {
             None,
             InitializeParams {
                 process_id: None,
-                initialization_options: self.language.initialization_options(),
+                initialization_options: resolve_initialization_options(
+                    self.server_config.initialization_options(),
+                    &self.current_working_directory,
+                ),
                 capabilities: ClientCapabilities {
                     workspace: Some(WorkspaceClientCapabilities {
                         apply_edit: Some(true),
@@ -389,6 +519,7 @@ impl LspServerProcess {
                         execute_command: Some(DynamicRegistrationClientCapabilities {
                             dynamic_registration: None,
                         }),
+                        configuration: Some(true),
                         symbol: Some(WorkspaceSymbolClientCapabilities {
                             ..Default::default()
                         }),
@@ -409,6 +540,10 @@ impl LspServerProcess {
                             }),
                             code_description_support: Some(true),
                             ..PublishDiagnosticsClientCapabilities::default()
+                        }),
+                        diagnostic: Some(DiagnosticClientCapabilities {
+                            dynamic_registration: Some(false),
+                            related_document_support: Some(false),
                         }),
                         completion: Some(CompletionClientCapabilities {
                             completion_item: Some(CompletionItemCapability {
@@ -760,7 +895,25 @@ impl LspServerProcess {
     fn handle_reply(&mut self, reply: serde_json::Value) -> anyhow::Result<()> {
         // Check if reply is Response or Notification
         // Only Notification contains the `method` field
-        if reply.get("error").is_some() {
+        if let Some(error) = reply.get("error") {
+            let message = error
+                .get("message")
+                .and_then(|message| message.as_str())
+                .unwrap_or("<missing error message>");
+            let method = reply
+                .get("id")
+                .and_then(|id| id.as_u64())
+                .and_then(|id| self.pending_response_requests.get(&id))
+                .map(|request| request.method.as_str())
+                .unwrap_or("<unknown request>");
+            if let Some(hint) = hint_for_lsp_error(message) {
+                lsp_error!(
+                    self.lsp_command(),
+                    "LSP request {method} failed: {message}\nHint: {hint}"
+                );
+            } else {
+                lsp_error!(self.lsp_command(), "LSP request {method} failed: {message}");
+            }
             return Err(anyhow::anyhow!("Reply contains field `error`."));
         }
         match reply.get("method") {
@@ -840,7 +993,10 @@ impl LspServerProcess {
 
                         self.app_message_sender
                             .send(AppMessage::LspNotification(Box::new(
-                                LspNotification::Initialized(Box::new(self.language.clone())),
+                                LspNotification::Initialized {
+                                    language: Box::new(self.language.clone()),
+                                    server_id: self.server_config.id().to_string(),
+                                },
                             )))?;
                     }
                     "textDocument/completion" => {
@@ -873,6 +1029,25 @@ impl LspServerProcess {
                         if let Some(payload) = payload {
                             self.send_to_app(AppMessage::LspNotification(Box::new(
                                 LspNotification::Hover(payload.into()),
+                            )));
+                        }
+                    }
+                    "textDocument/diagnostic" => {
+                        let payload: <lsp_request!("textDocument/diagnostic") as Request>::Result =
+                            serde_json::from_value(response)?;
+                        let Some(path) = path else {
+                            return Ok(());
+                        };
+                        if let Some(diagnostics) = diagnostics_from_document_diagnostic(payload) {
+                            self.send_to_app(AppMessage::LspNotification(Box::new(
+                                LspNotification::PublishDiagnostics {
+                                    server_id: self.server_config.id().to_string(),
+                                    params: PublishDiagnosticsParams {
+                                        uri: path_buf_to_url(path)?,
+                                        diagnostics,
+                                        version: None,
+                                    },
+                                },
                             )));
                         }
                     }
@@ -1096,7 +1271,10 @@ impl LspServerProcess {
                             serde_json::from_value(request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?)?;
 
                         self.send_to_app(AppMessage::LspNotification(Box::new(
-                            LspNotification::PublishDiagnostics(params),
+                            LspNotification::PublishDiagnostics {
+                                server_id: self.server_config.id().to_string(),
+                                params,
+                            },
                         )));
                     }
                     "workspace/applyEdit" => {
@@ -1112,10 +1290,18 @@ impl LspServerProcess {
                         )));
                     }
                     "workspace/configuration" => {
-                        // Just return null for now, since I don't know how how to handle this properly
-                        // This reply is necessary for Graphql LSP to work
-
-                        self.send_reply(request.id, serde_json::Value::Null)?;
+                        let params: ConfigurationParams = serde_json::from_value(
+                            request
+                                .params
+                                .ok_or_else(|| anyhow::anyhow!("Missing params"))?,
+                        )?;
+                        self.send_reply(
+                            request.id,
+                            workspace_configuration_response(
+                                params,
+                                &self.current_working_directory,
+                            ),
+                        )?;
                     }
                     "window/workDoneProgress/create" => {
                         // This reply is necessary for the Go LSP (gopls) to work
@@ -1341,13 +1527,14 @@ impl LspServerProcess {
         self.send_notification::<lsp_notification!("textDocument/didOpen")>(
             DidOpenTextDocumentParams {
                 text_document: TextDocumentItem {
-                    uri: path_buf_to_url(file_path)?,
+                    uri: path_buf_to_url(file_path.clone())?,
                     language_id,
                     version: version as i32,
                     text: content,
                 },
             },
-        )
+        )?;
+        self.request_document_diagnostics(file_path)
     }
 
     fn text_document_did_change(
@@ -1363,7 +1550,7 @@ impl LspServerProcess {
         self.send_notification::<lsp_notification!("textDocument/didChange")>(
             DidChangeTextDocumentParams {
                 text_document: VersionedTextDocumentIdentifier {
-                    uri: path_buf_to_url(file_path)?,
+                    uri: path_buf_to_url(file_path.clone())?,
                     version,
                 },
                 content_changes: vec![TextDocumentContentChangeEvent {
@@ -1372,7 +1559,8 @@ impl LspServerProcess {
                     text: content,
                 }],
             },
-        )
+        )?;
+        self.request_document_diagnostics(file_path)
     }
 
     fn text_document_did_save(&mut self, file_path: AbsolutePath) -> Result<(), anyhow::Error> {
@@ -1382,10 +1570,41 @@ impl LspServerProcess {
 
         self.send_notification::<lsp_notification!("textDocument/didSave")>(
             DidSaveTextDocumentParams {
-                text_document: path_buf_to_text_document_identifier(file_path)?,
+                text_document: path_buf_to_text_document_identifier(file_path.clone())?,
                 text: None,
             },
+        )?;
+        self.request_document_diagnostics(file_path)
+    }
+
+    fn request_document_diagnostics(
+        &mut self,
+        file_path: AbsolutePath,
+    ) -> Result<(), anyhow::Error> {
+        if !self.server_supports_pull_diagnostics() {
+            return Ok(());
+        }
+        self.send_request::<lsp_request!("textDocument/diagnostic")>(
+            ResponseContext::default(),
+            Some(file_path.clone()),
+            DocumentDiagnosticParams {
+                text_document: path_buf_to_text_document_identifier(file_path)?,
+                identifier: None,
+                previous_result_id: None,
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            },
         )
+    }
+
+    fn server_supports_pull_diagnostics(&self) -> bool {
+        matches!(
+            self.server_config.diagnostic_mode(),
+            LspDiagnosticMode::Pull | LspDiagnosticMode::Both
+        ) && self
+            .server_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.diagnostic_provider.is_some())
     }
 
     fn workspace_did_rename_files(
@@ -1938,10 +2157,7 @@ impl LspServerProcess {
     }
 
     fn lsp_command(&self) -> String {
-        self.language
-            .lsp_process_command()
-            .map(|command| command.to_string())
-            .unwrap_or_default()
+        self.server_config.process_command().to_string()
     }
 
     fn handle_progress_notification(&mut self, params: ProgressParams) {
@@ -2134,6 +2350,96 @@ mod test_lsp_server_process {
     }
 
     #[test]
+    fn full_document_diagnostic_report_returns_diagnostics() {
+        let diagnostic = lsp_types::Diagnostic::new_simple(
+            lsp_types::Range::new(
+                lsp_types::Position::new(0, 0),
+                lsp_types::Position::new(0, 1),
+            ),
+            "hello".to_string(),
+        );
+        let result = DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(
+            RelatedFullDocumentDiagnosticReport {
+                related_documents: None,
+                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                    result_id: None,
+                    items: vec![diagnostic.clone()],
+                },
+            },
+        ));
+
+        assert_eq!(
+            diagnostics_from_document_diagnostic(result),
+            Some(vec![diagnostic])
+        );
+    }
+
+    #[test]
+    fn workspace_configuration_includes_vue_eslint_validation() {
+        let root: AbsolutePath = std::env::current_dir().unwrap().try_into().unwrap();
+        let response = workspace_configuration_response(
+            ConfigurationParams {
+                items: vec![ConfigurationItem {
+                    scope_uri: None,
+                    section: Some("eslint".to_string()),
+                }],
+            },
+            &root,
+        );
+        let configs = response.as_array().unwrap();
+        assert!(configs[0]["validate"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("vue")));
+    }
+
+    #[test]
+    fn workspace_configuration_includes_vue_typescript_plugin_for_vtsls() {
+        let root: AbsolutePath = std::env::current_dir().unwrap().try_into().unwrap();
+        let response = workspace_configuration_response(
+            ConfigurationParams {
+                items: vec![ConfigurationItem {
+                    scope_uri: None,
+                    section: Some("".to_string()),
+                }],
+            },
+            &root,
+        );
+        let configs = response.as_array().unwrap();
+        assert_eq!(
+            configs[0]["typescript.tsdk"],
+            format!(
+                "{}/node_modules/typescript/lib",
+                std::env::current_dir().unwrap().display()
+            )
+        );
+        assert_eq!(
+            configs[0]["vtsls"]["tsserver"]["globalPlugins"][0]["name"],
+            "@vue/typescript-plugin"
+        );
+    }
+
+    #[test]
+    fn lsp_error_hint_mentions_vue_typescript_plugin() {
+        let hint = hint_for_lsp_error(
+            "Request textDocument/definition failed with message: Cannot find provider for definition, the feature is possibly not supported by the current TypeScript version or disabled by settings.",
+        )
+        .unwrap();
+
+        assert!(hint.contains("@vue/typescript-plugin"));
+    }
+
+    #[test]
+    fn lsp_error_hint_mentions_eslint_resolution() {
+        let hint = hint_for_lsp_error(
+            "Request textDocument/diagnostic failed with message: The \"path\" argument must be of type string. Received undefined",
+        )
+        .unwrap();
+
+        assert!(hint.contains("ESLint"));
+    }
+
+    #[test]
     fn lsp_should_shutdown_after_too_many_consecutive_errors() -> anyhow::Result<()> {
         let (app_sender, app_receiver) = crossbeam_channel::unbounded();
         let (sender, receiver) = mpsc::channel();
@@ -2152,6 +2458,10 @@ mod test_lsp_server_process {
 
         let lsp_process = LspServerProcess {
             language: Language::default(),
+            server_config: LspServerConfig::new(
+                "test",
+                shared::language::Command::new("test-lsp", &[]),
+            ),
             stdin: Some(stdin),
             stdout: Some(stdout),
             stderr: Some(stderr),

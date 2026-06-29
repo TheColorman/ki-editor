@@ -2319,8 +2319,9 @@ fn diagnostics_range_updated_by_edit() -> anyhow::Result<()> {
                 focus: true,
             }),
             Editor(SetContent("fn main() { let x = 123 }".trim().to_string())),
-            App(HandleLspNotification(LspNotification::PublishDiagnostics(
-                lsp_types::PublishDiagnosticsParams {
+            App(HandleLspNotification(LspNotification::PublishDiagnostics {
+                server_id: "test".to_string(),
+                params: lsp_types::PublishDiagnosticsParams {
                     uri: s.main_rs().to_url().unwrap(),
                     diagnostics: [lsp_types::Diagnostic {
                         range: lsp_types::Range::new(
@@ -2338,7 +2339,7 @@ fn diagnostics_range_updated_by_edit() -> anyhow::Result<()> {
                     .to_vec(),
                     version: None,
                 },
-            ))),
+            })),
             Expect(ExpectKind::DiagnosticsRanges(
                 [CharIndexRange::from(CharIndex(3)..CharIndex(7))].to_vec(),
             )),

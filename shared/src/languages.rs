@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use crate::language::{CargoLinkedTreesitterLanguage, GrammarConfigKind};
+use crate::language::{CargoLinkedTreesitterLanguage, GrammarConfigKind, LspDiagnosticMode};
 
-use super::language::{Command, GrammarConfig, Language, LanguageId, LspCommand};
+use super::language::{Command, GrammarConfig, Language, LanguageId, LspCommand, LspServerConfig};
 
 fn to_vec(slice: &[&'static str]) -> Vec<String> {
     slice.iter().map(|s| s.to_string()).collect()
@@ -784,6 +784,28 @@ fn vue() -> Language {
         extensions: to_vec(&["vue"]),
         formatter: Some(Command::new("prettierd", &[".vue"])),
         lsp_language_id: Some(LanguageId::new("vue")),
+        lsp_servers: vec![
+            LspServerConfig {
+                id: "vue".to_string(),
+                command: Command::new("vtsls", &["--stdio"]),
+                language_id: Some(LanguageId::new("vue")),
+                initialization_options: Some(vtsls_vue_initialization_options()),
+                environment: HashMap::new(),
+                primary: true,
+                diagnostics: true,
+                diagnostic_mode: LspDiagnosticMode::Both,
+            },
+            LspServerConfig {
+                id: "eslint".to_string(),
+                command: Command::new("vscode-eslint-language-server", &["--stdio"]),
+                language_id: Some(LanguageId::new("vue")),
+                initialization_options: None,
+                environment: HashMap::new(),
+                primary: false,
+                diagnostics: true,
+                diagnostic_mode: LspDiagnosticMode::Pull,
+            },
+        ],
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "vue".to_string(),
             kind: GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Vue),
@@ -791,6 +813,24 @@ fn vue() -> Language {
         block_comment_affixes: Some(("<!--".to_string(), "-->".to_string())),
         ..Language::new()
     }
+}
+
+fn vtsls_vue_initialization_options() -> serde_json::Value {
+    json!({
+        "typescript": {
+            "tsdk": "${workspace}/node_modules/typescript/lib"
+        },
+        "vtsls": {
+            "tsserver": {
+                "globalPlugins": [{
+                    "name": "@vue/typescript-plugin",
+                    "location": "${vue_typescript_plugin}",
+                    "languages": ["vue"],
+                    "enableForWorkspaceTypeScriptVersions": true
+                }]
+            }
+        }
+    })
 }
 
 fn json() -> Language {
@@ -1394,6 +1434,21 @@ mod test {
             &scss.highlight_query().unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn vue_uses_vue_and_eslint_lsp_servers() {
+        let languages = super::languages();
+        let vue = languages.get("vue").unwrap();
+        let servers = vue.lsp_server_configs();
+
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].id(), "vue");
+        assert!(servers[0].primary());
+        assert_eq!(servers[0].process_command().command(), "vtsls");
+        assert_eq!(servers[1].id(), "eslint");
+        assert!(!servers[1].primary());
+        assert_eq!(servers[1].diagnostic_mode(), super::LspDiagnosticMode::Pull);
     }
 
     #[test]

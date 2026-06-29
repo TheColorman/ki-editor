@@ -28,7 +28,7 @@ use shared::process_command::SpawnCommandError;
 use shared::{absolute_path::AbsolutePath, language::Language};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
-use std::{cell::RefCell, ops::Range};
+use std::{cell::RefCell, collections::HashMap, ops::Range};
 use tree_sitter::{Node, Parser, Tree};
 use tree_sitter::{Point as TreeSitterPoint, Range as TreeSitterRange};
 #[cfg(test)]
@@ -53,7 +53,7 @@ pub struct Buffer {
     editor_config: EditorConfigSettings,
     path: Option<AbsolutePath>,
     highlighted_spans: HighlightedSpans,
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: HashMap<String, Vec<Diagnostic>>,
     decorations: Vec<Decoration>,
     selection_set_history: History<SelectionSet>,
 
@@ -184,7 +184,7 @@ impl Buffer {
             path: None,
             highlighted_spans: HighlightedSpans::default(),
             decorations: Vec::new(),
-            diagnostics: Vec::new(),
+            diagnostics: HashMap::new(),
             selection_set_history: History::new(),
 
             owner: BufferOwner::System,
@@ -326,15 +326,20 @@ impl Buffer {
         conflicts
     }
 
-    pub fn set_diagnostics(&mut self, diagnostics: Vec<lsp_types::Diagnostic>) {
-        self.diagnostics = diagnostics
+    pub fn set_diagnostics(&mut self, source: String, diagnostics: Vec<lsp_types::Diagnostic>) {
+        let diagnostics = diagnostics
             .into_iter()
             .filter_map(|diagnostic| Diagnostic::try_from(self, diagnostic).ok())
             .collect();
+        self.diagnostics.insert(source, diagnostics);
     }
 
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
-        self.diagnostics.clone()
+        self.diagnostics
+            .values()
+            .flat_map(|diagnostics| diagnostics.iter().cloned())
+            .sorted_by_key(|diagnostic| diagnostic.range)
+            .collect()
     }
 
     pub fn words(&self) -> Vec<String> {
@@ -791,13 +796,16 @@ impl Buffer {
         let dispatches = self.flag_as_modified();
 
         // Update all the non-positional spans
-        self.diagnostics.retain_mut(|diagnostic| {
-            if let Some(range) = diagnostic.range.apply_edit(edit) {
-                diagnostic.range = range;
-                true
-            } else {
-                false
-            }
+        self.diagnostics.retain(|_, diagnostics| {
+            diagnostics.retain_mut(|diagnostic| {
+                if let Some(range) = diagnostic.range.apply_edit(edit) {
+                    diagnostic.range = range;
+                    true
+                } else {
+                    false
+                }
+            });
+            !diagnostics.is_empty()
         });
         let max_char_index = CharIndex(self.len_chars());
         self.selection_set_history = std::mem::take(&mut self.selection_set_history)

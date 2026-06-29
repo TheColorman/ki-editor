@@ -36,7 +36,7 @@ use crate::{
     selection_mode::GetGapMovement,
 };
 
-use shared::{absolute_path::AbsolutePath, language::LanguageId};
+use shared::absolute_path::AbsolutePath;
 
 #[cfg(test)]
 use crate::layout::BufferContentsMap;
@@ -195,7 +195,7 @@ pub enum ExpectKind {
     CurrentSelectionMode(SelectionMode),
     CurrentGlobalMode(Option<GlobalMode>),
     LspRequestSent(FromEditor),
-    LspServerInitializedArgs(Option<(LanguageId, Vec<AbsolutePath>)>),
+    LspServerInitializedArgs(Option<(String, Vec<AbsolutePath>)>),
     CurrentCopiedTextHistoryOffset(isize),
     CurrentReveal(Option<Reveal>),
     CountHighlightedCells(StyleKey, usize),
@@ -1915,8 +1915,9 @@ fn local_lsp_references() -> anyhow::Result<()> {
 #[test]
 fn global_diagnostics() -> Result<(), anyhow::Error> {
     execute_test(|s| {
-        let publish_diagnostics = |path: AbsolutePath| {
-            LspNotification::PublishDiagnostics(lsp_types::PublishDiagnosticsParams {
+        let publish_diagnostics = |path: AbsolutePath| LspNotification::PublishDiagnostics {
+            server_id: "test".to_string(),
+            params: lsp_types::PublishDiagnosticsParams {
                 uri: path.to_url().unwrap(),
                 diagnostics: [lsp_types::Diagnostic {
                     range: lsp_types::Range::new(
@@ -1934,7 +1935,7 @@ fn global_diagnostics() -> Result<(), anyhow::Error> {
                 }]
                 .to_vec(),
                 version: None,
-            })
+            },
         };
         Box::new([
             App(OpenFile {
@@ -2373,18 +2374,21 @@ fn diagnostic_info() -> Result<(), anyhow::Error> {
                 focus: true,
             }),
             App(Dispatch::HandleLspNotification(
-                LspNotification::PublishDiagnostics(lsp_types::PublishDiagnosticsParams {
-                    uri: Url::from_file_path(s.foo_rs()).unwrap(),
-                    diagnostics: [lsp_types::Diagnostic::new_simple(
-                        lsp_types::Range::new(
-                            lsp_types::Position::new(0, 1),
-                            lsp_types::Position::new(0, 2),
-                        ),
-                        "Hello world".to_string(),
-                    )]
-                    .to_vec(),
-                    version: None,
-                }),
+                LspNotification::PublishDiagnostics {
+                    server_id: "test".to_string(),
+                    params: lsp_types::PublishDiagnosticsParams {
+                        uri: Url::from_file_path(s.foo_rs()).unwrap(),
+                        diagnostics: [lsp_types::Diagnostic::new_simple(
+                            lsp_types::Range::new(
+                                lsp_types::Position::new(0, 1),
+                                lsp_types::Position::new(0, 2),
+                            ),
+                            "Hello world".to_string(),
+                        )]
+                        .to_vec(),
+                        version: None,
+                    },
+                },
             )),
             Expect(ComponentsOrder([ComponentKind::SuggestiveEditor].to_vec())),
             Editor(SetSelectionMode(
@@ -2398,12 +2402,15 @@ fn diagnostic_info() -> Result<(), anyhow::Error> {
             App(HandleKeyEvent(key!("esc"))),
             Expect(ComponentsOrder([ComponentKind::SuggestiveEditor].to_vec())),
             App(Dispatch::HandleLspNotification(
-                LspNotification::PublishDiagnostics(lsp_types::PublishDiagnosticsParams {
-                    uri: Url::from_file_path(s.foo_rs()).unwrap(),
-                    // No diagnostic
-                    diagnostics: Vec::default(),
-                    version: None,
-                }),
+                LspNotification::PublishDiagnostics {
+                    server_id: "test".to_string(),
+                    params: lsp_types::PublishDiagnosticsParams {
+                        uri: Url::from_file_path(s.foo_rs()).unwrap(),
+                        // No diagnostic
+                        diagnostics: Vec::default(),
+                        version: None,
+                    },
+                },
             )),
             Editor(MoveSelection(Right)),
             // Expect no global info is shown, since there is no diagnostic
@@ -2461,14 +2468,17 @@ fn diagnostic_severity_decoration_precedence() -> Result<(), anyhow::Error> {
                 width: 80,
             })),
             App(Dispatch::HandleLspNotification(
-                LspNotification::PublishDiagnostics(lsp_types::PublishDiagnosticsParams {
-                    uri: Url::from_file_path(s.foo_rs()).unwrap(),
-                    diagnostics: diagnostics
-                        .into_iter()
-                        .map(|(start, end, severity)| diagnostic(start, end, severity))
-                        .collect_vec(),
-                    version: None,
-                }),
+                LspNotification::PublishDiagnostics {
+                    server_id: "test".to_string(),
+                    params: lsp_types::PublishDiagnosticsParams {
+                        uri: Url::from_file_path(s.foo_rs()).unwrap(),
+                        diagnostics: diagnostics
+                            .into_iter()
+                            .map(|(start, end, severity)| diagnostic(start, end, severity))
+                            .collect_vec(),
+                        version: None,
+                    },
+                },
             )),
             ExpectMulti(
                 (0..1)
@@ -2509,12 +2519,15 @@ fn same_range_diagnostics_should_be_merged() -> Result<(), anyhow::Error> {
                 focus: true,
             }),
             App(Dispatch::HandleLspNotification(
-                LspNotification::PublishDiagnostics(lsp_types::PublishDiagnosticsParams {
-                    uri: Url::from_file_path(s.foo_rs()).unwrap(),
-                    diagnostics: [diagnostic("foo"), diagnostic("bar"), diagnostic("spam")]
-                        .to_vec(),
-                    version: None,
-                }),
+                LspNotification::PublishDiagnostics {
+                    server_id: "test".to_string(),
+                    params: lsp_types::PublishDiagnosticsParams {
+                        uri: Url::from_file_path(s.foo_rs()).unwrap(),
+                        diagnostics: [diagnostic("foo"), diagnostic("bar"), diagnostic("spam")]
+                            .to_vec(),
+                        version: None,
+                    },
+                },
             )),
             Editor(SetSelectionMode(
                 IfCurrentNotFound::LookForward,
@@ -3805,11 +3818,12 @@ fn lsp_initialization_should_only_send_relevant_opened_documents() -> anyhow::Re
                 owner: BufferOwner::User,
                 focus: true,
             }),
-            App(HandleLspNotification(LspNotification::Initialized(
-                Box::new(crate::config::from_extension("ts").unwrap()),
-            ))),
+            App(HandleLspNotification(LspNotification::Initialized {
+                language: Box::new(crate::config::from_extension("ts").unwrap()),
+                server_id: "primary".to_string(),
+            })),
             Expect(LspServerInitializedArgs(Some((
-                LanguageId::new("typescript"),
+                "typescript:primary".to_string(),
                 // Expect only hello.ts is sent to the Typescript LSP server
                 // although main.rs is opened before
                 [s.hello_ts()].to_vec(),
@@ -4029,11 +4043,66 @@ fn renaming_marked_files_should_update_file_marks() -> anyhow::Result<()> {
 }
 
 #[test]
+fn diagnostics_from_different_lsp_sources_should_merge() -> Result<(), anyhow::Error> {
+    execute_test(|s| {
+        let publish_diagnostic = |server_id: &str, start: u32, end: u32| {
+            Dispatch::HandleLspNotification(LspNotification::PublishDiagnostics {
+                server_id: server_id.to_string(),
+                params: lsp_types::PublishDiagnosticsParams {
+                    uri: Url::from_file_path(s.foo_rs()).unwrap(),
+                    diagnostics: [lsp_types::Diagnostic::new_simple(
+                        lsp_types::Range::new(
+                            lsp_types::Position::new(0, start),
+                            lsp_types::Position::new(0, end),
+                        ),
+                        server_id.to_string(),
+                    )]
+                    .to_vec(),
+                    version: None,
+                },
+            })
+        };
+        let clear_diagnostics = |server_id: &str| {
+            Dispatch::HandleLspNotification(LspNotification::PublishDiagnostics {
+                server_id: server_id.to_string(),
+                params: lsp_types::PublishDiagnosticsParams {
+                    uri: Url::from_file_path(s.foo_rs()).unwrap(),
+                    diagnostics: Vec::new(),
+                    version: None,
+                },
+            })
+        };
+        Box::new([
+            App(OpenFile {
+                path: s.foo_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent("abcdef".to_string())),
+            App(publish_diagnostic("vue", 0, 1)),
+            App(publish_diagnostic("eslint", 2, 3)),
+            Expect(DiagnosticsRanges(
+                [
+                    CharIndexRange::from(CharIndex(0)..CharIndex(1)),
+                    CharIndexRange::from(CharIndex(2)..CharIndex(3)),
+                ]
+                .to_vec(),
+            )),
+            App(clear_diagnostics("eslint")),
+            Expect(DiagnosticsRanges(
+                [CharIndexRange::from(CharIndex(0)..CharIndex(1))].to_vec(),
+            )),
+        ])
+    })
+}
+
+#[test]
 fn escape_global_diagnostics_should_not_change_selection() -> Result<(), anyhow::Error> {
     execute_test(|s| {
         let diagnostic = |path: AbsolutePath| {
-            Dispatch::HandleLspNotification(LspNotification::PublishDiagnostics(
-                lsp_types::PublishDiagnosticsParams {
+            Dispatch::HandleLspNotification(LspNotification::PublishDiagnostics {
+                server_id: "test".to_string(),
+                params: lsp_types::PublishDiagnosticsParams {
                     uri: Url::from_file_path(path).unwrap(),
                     diagnostics: [lsp_types::Diagnostic::new_simple(
                         lsp_types::Range::new(
@@ -4045,7 +4114,7 @@ fn escape_global_diagnostics_should_not_change_selection() -> Result<(), anyhow:
                     .to_vec(),
                     version: None,
                 },
-            ))
+            })
         };
         Box::new([
             App(OpenFile {
