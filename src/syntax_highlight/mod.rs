@@ -75,35 +75,41 @@ impl Highlight for HighlightConfiguration {
             |_| None,
         )?;
 
-        let mut highlight_events = vec![];
-        let mut highlighted_spans = vec![];
+        collect_highlighted_spans(highlights)
+    }
+}
 
-        for event in highlights {
-            match event? {
-                HighlightEvent::HighlightStart(s) => {
-                    highlight_events.push(s);
-                }
-                HighlightEvent::HighlightEnd => {
-                    highlight_events.pop();
-                }
-                HighlightEvent::Source { start, end } => {
-                    if let Some(highlight) = highlight_events.last() {
-                        let style_key = StyleKey::Syntax(IndexedHighlightGroup::new(highlight.0));
-                        highlighted_spans.push(HighlightedSpan {
-                            byte_range: start..end,
-                            style_key,
-                        });
-                    }
+fn collect_highlighted_spans<'a>(
+    highlights: impl Iterator<Item = Result<HighlightEvent, tree_sitter_highlight::Error>> + 'a,
+) -> anyhow::Result<HighlightedSpans> {
+    let mut highlight_events = vec![];
+    let mut highlighted_spans = vec![];
+
+    for event in highlights {
+        match event? {
+            HighlightEvent::HighlightStart(s) => {
+                highlight_events.push(s);
+            }
+            HighlightEvent::HighlightEnd => {
+                highlight_events.pop();
+            }
+            HighlightEvent::Source { start, end } => {
+                if let Some(highlight) = highlight_events.last() {
+                    let style_key = StyleKey::Syntax(IndexedHighlightGroup::new(highlight.0));
+                    highlighted_spans.push(HighlightedSpan {
+                        byte_range: start..end,
+                        style_key,
+                    });
                 }
             }
         }
-
-        debug_assert!(highlighted_spans
-            .iter()
-            .is_sorted_by_key(|span| (span.byte_range.start, span.byte_range.end)));
-
-        Ok(HighlightedSpans(highlighted_spans))
     }
+
+    debug_assert!(highlighted_spans
+        .iter()
+        .is_sorted_by_key(|span| (span.byte_range.start, span.byte_range.end)));
+
+    Ok(HighlightedSpans(highlighted_spans))
 }
 
 #[derive(Clone, Default, Debug)]
@@ -232,29 +238,75 @@ impl HighlightConfigs {
         Self::default()
     }
 
+    fn ensure_highlight_config(
+        &mut self,
+        language: Language,
+    ) -> anyhow::Result<Option<TreeSitterGrammarId>> {
+        let Some(grammar_id) = language.tree_sitter_grammar_id() else {
+            return Ok(None);
+        };
+        if self.0.contains_key(&grammar_id) {
+            return Ok(Some(grammar_id));
+        }
+
+        let Some(highlight_config) = language.get_highlight_config()? else {
+            return Ok(None);
+        };
+        self.0.insert(grammar_id.clone(), highlight_config);
+        Ok(Some(grammar_id))
+    }
+
     pub fn highlight(
         &mut self,
         language: Language,
         source_code: &str,
         cancellation_flag: &AtomicUsize,
     ) -> Result<HighlightedSpans, anyhow::Error> {
-        let Some(grammar_id) = language.tree_sitter_grammar_id() else {
+        let Some(grammar_id) = self.ensure_highlight_config(language.clone())? else {
             return Ok(HighlightedSpans::default());
         };
-        let config = match self.0.get(&grammar_id) {
-            Some(config) => config,
-            None => {
-                if let Some(highlight_config) = language.get_highlight_config()? {
-                    self.0.insert(grammar_id.clone(), highlight_config);
-                    let get_error = || {
-                        anyhow::anyhow!("Unreachable: should be able to obtain a value that is inserted to the HashMap")
-                    };
-                    self.0.get(&grammar_id).ok_or_else(get_error)?
-                } else {
-                    return Ok(HighlightedSpans::default());
-                }
+
+        for injected_language_id in language.injected_language_ids() {
+            if let Some(injected_language) = language_from_injection_name(injected_language_id) {
+                self.ensure_highlight_config(injected_language)?;
             }
-        };
-        config.highlight(source_code, cancellation_flag)
+        }
+
+        let configs = &self.0;
+        let config = configs.get(&grammar_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unreachable: should be able to obtain a cached highlight configuration"
+            )
+        })?;
+
+        let mut highlighter = Highlighter::new();
+        let highlights = highlighter.highlight(
+            config,
+            source_code.as_bytes(),
+            Some(cancellation_flag),
+            |injection_name| {
+                language_from_injection_name(injection_name)
+                    .and_then(|language| language.tree_sitter_grammar_id())
+                    .and_then(|grammar_id| configs.get(&grammar_id))
+            },
+        )?;
+
+        collect_highlighted_spans(highlights)
     }
+}
+
+fn language_from_injection_name(name: &str) -> Option<Language> {
+    let language_key = match name {
+        "js" | "javascript" => "javascript",
+        "jsx" => "javascriptreact",
+        "ts" | "typescript" => "typescript",
+        "tsx" => "typescriptreact",
+        "css" => "css",
+        "scss" | "sass" | "less" | "postcss" => "scss",
+        _ => name,
+    };
+    crate::config::AppConfig::singleton()
+        .languages()
+        .get(language_key)
+        .cloned()
 }

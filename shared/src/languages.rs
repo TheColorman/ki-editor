@@ -55,6 +55,7 @@ pub fn languages() -> HashMap<String, Language> {
         ("qmldir", qmldir()),
         ("javascriptreact", javascriptreact()),
         ("svelte", svelte()),
+        ("vue", vue()),
         ("json", json()),
         ("julia", julia()),
         ("just", just()),
@@ -778,6 +779,20 @@ fn svelte() -> Language {
     }
 }
 
+fn vue() -> Language {
+    Language {
+        extensions: to_vec(&["vue"]),
+        formatter: Some(Command::new("prettierd", &[".vue"])),
+        lsp_language_id: Some(LanguageId::new("vue")),
+        tree_sitter_grammar_config: Some(GrammarConfig {
+            id: "vue".to_string(),
+            kind: GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Vue),
+        }),
+        block_comment_affixes: Some(("<!--".to_string(), "-->".to_string())),
+        ..Language::new()
+    }
+}
+
 fn json() -> Language {
     Language {
         extensions: to_vec(&["json", "gyp"]),
@@ -1355,6 +1370,32 @@ fn glsl() -> Language {
 
 #[cfg(test)]
 mod test {
+    use tree_sitter::Query;
+
+    #[test]
+    fn vue_and_scss_queries_compile() {
+        let languages = super::languages();
+
+        let vue = languages.get("vue").unwrap();
+        Query::new(
+            &vue.tree_sitter_language().unwrap(),
+            &vue.highlight_query().unwrap(),
+        )
+        .unwrap();
+        Query::new(
+            &vue.tree_sitter_language().unwrap(),
+            vue.injection_query().unwrap(),
+        )
+        .unwrap();
+
+        let scss = languages.get("scss").unwrap();
+        Query::new(
+            &scss.tree_sitter_language().unwrap(),
+            &scss.highlight_query().unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_languages_match_nvim_treesitter_languages() {
         const MISSING_NVIM_HIGHLIGHTS: &[&str] = &[

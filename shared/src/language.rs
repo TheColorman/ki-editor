@@ -9,6 +9,108 @@ use tree_sitter::Query;
 pub(crate) use crate::process_command::ProcessCommand;
 use crate::{formatter::Formatter, ts_highlight_query::get_highlight_query};
 
+const VUE_HIGHLIGHTS_QUERY: &str = r#"
+[
+  (template_element)
+  (tag_name)
+  (start_tag)
+  (end_tag)
+] @tag
+
+(erroneous_end_tag_name) @error
+(attribute_name) @tag.attribute
+(attribute_value) @property
+(quoted_attribute_value) @string
+(comment) @comment
+
+(interpolation) @punctuation.special
+(interpolation
+  (raw_text) @none)
+
+[
+  (directive_modifier)
+  (directive_name)
+  (directive_value)
+  (dynamic_directive_inner_value)
+] @tag.attribute
+
+"=" @operator
+
+[
+  "<"
+  ">"
+  "</"
+  "/>"
+] @tag.delimiter
+"#;
+
+const VUE_INJECTIONS_QUERY: &str = r#"
+; <script>
+(script_element
+  (raw_text) @injection.content
+  (#set! injection.language "javascript"))
+
+; <script lang="js">
+((script_element
+  (start_tag
+    (attribute
+      (attribute_name) @_lang
+      (quoted_attribute_value
+        (attribute_value) @_js)))
+  (raw_text) @injection.content)
+  (#eq? @_lang "lang")
+  (#eq? @_js "js")
+  (#set! injection.language "javascript"))
+
+; <script lang="ts">
+((script_element
+  (start_tag
+    (attribute
+      (attribute_name) @_lang
+      (quoted_attribute_value
+        (attribute_value) @_ts)))
+  (raw_text) @injection.content)
+  (#eq? @_lang "lang")
+  (#eq? @_ts "ts")
+  (#set! injection.language "typescript"))
+
+; <script lang="tsx"> and <script lang="jsx">
+(script_element
+  (start_tag
+    (attribute
+      (attribute_name) @_lang
+      (quoted_attribute_value
+        (attribute_value) @injection.language)))
+  (raw_text) @injection.content
+  (#eq? @_lang "lang")
+  (#any-of? @injection.language "tsx" "jsx"))
+
+; <style> defaults to CSS.
+(style_element
+  (raw_text) @injection.content
+  (#set! injection.language "css"))
+
+; <style lang="css"> and <style lang="scss">
+((style_element
+  (start_tag
+    (attribute
+      (attribute_name) @_lang
+      (quoted_attribute_value
+        (attribute_value) @injection.language)))
+  (raw_text) @injection.content)
+  (#eq? @_lang "lang")
+  (#any-of? @injection.language "css" "scss"))
+
+((interpolation
+  (raw_text) @injection.content)
+  (#set! injection.language "typescript"))
+
+(directive_attribute
+  (quoted_attribute_value
+    (attribute_value) @injection.content)
+  (#set! injection.language "typescript"))
+"#;
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -82,6 +184,7 @@ pub enum CargoLinkedTreesitterLanguage {
     QmlDir,
     JSX,
     Svelte,
+    Vue,
     JSON,
     YAML,
     HTML,
@@ -155,6 +258,7 @@ impl CargoLinkedTreesitterLanguage {
             CargoLinkedTreesitterLanguage::QmlDir => tree_sitter_qmldir::LANGUAGE.into(),
             CargoLinkedTreesitterLanguage::JSX => tree_sitter_javascript::LANGUAGE.into(),
             CargoLinkedTreesitterLanguage::Svelte => tree_sitter_svelte_ng::LANGUAGE.into(),
+            CargoLinkedTreesitterLanguage::Vue => tree_sitter_vue_next::LANGUAGE.into(),
             CargoLinkedTreesitterLanguage::JSON => tree_sitter_json::LANGUAGE.into(),
             CargoLinkedTreesitterLanguage::YAML => tree_sitter_yaml::LANGUAGE.into(),
             CargoLinkedTreesitterLanguage::HTML => tree_sitter_html::LANGUAGE.into(),
@@ -235,6 +339,7 @@ impl CargoLinkedTreesitterLanguage {
             CargoLinkedTreesitterLanguage::QmlDir => Some(tree_sitter_qmldir::HIGHLIGHTS_QUERY),
             CargoLinkedTreesitterLanguage::JSX => Some(tree_sitter_javascript::HIGHLIGHT_QUERY),
             CargoLinkedTreesitterLanguage::Svelte => Some(tree_sitter_svelte_ng::HIGHLIGHTS_QUERY),
+            CargoLinkedTreesitterLanguage::Vue => Some(VUE_HIGHLIGHTS_QUERY),
             CargoLinkedTreesitterLanguage::JSON => Some(tree_sitter_json::HIGHLIGHTS_QUERY),
             CargoLinkedTreesitterLanguage::YAML => Some(tree_sitter_yaml::HIGHLIGHTS_QUERY),
             CargoLinkedTreesitterLanguage::HTML => Some(tree_sitter_html::HIGHLIGHTS_QUERY),
@@ -300,6 +405,13 @@ impl CargoLinkedTreesitterLanguage {
                 Some(include_str!("../queries/gherkin/highlights.scm"))
             }
             CargoLinkedTreesitterLanguage::Java => Some(tree_sitter_java::HIGHLIGHTS_QUERY),
+        }
+    }
+
+    fn default_injection_query(&self) -> Option<&'static str> {
+        match self {
+            CargoLinkedTreesitterLanguage::Vue => Some(VUE_INJECTIONS_QUERY),
+            _ => None,
         }
     }
 }
@@ -560,7 +672,23 @@ impl Language {
     }
 
     pub fn injection_query(&self) -> Option<&'static str> {
-        None
+        let config = self.tree_sitter_grammar_config.as_ref()?;
+        match &config.kind {
+            GrammarConfigKind::CargoLinked(language) => language.default_injection_query(),
+            GrammarConfigKind::FromSource { .. } => None,
+        }
+    }
+
+    pub fn injected_language_ids(&self) -> Vec<&'static str> {
+        let Some(config) = self.tree_sitter_grammar_config.as_ref() else {
+            return Vec::new();
+        };
+        match &config.kind {
+            GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Vue) => {
+                vec!["javascript", "typescript", "tsx", "jsx", "css", "scss"]
+            }
+            _ => Vec::new(),
+        }
     }
 
     pub fn lsp_process_command(&self) -> Option<ProcessCommand> {

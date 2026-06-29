@@ -72,6 +72,7 @@ const INCLUDED_NVIM_TREESITTER_LANGUAGES: &[&str] = &[
     "typescript",
     "typst",
     "unison",
+    "vue",
     "xml",
     "yaml",
     "kdl",
