@@ -430,7 +430,10 @@ mod tests {
         let expected_style = theme.get_style(&expected);
         for column in column..column + search.len() {
             if let Some(background_color) = expected_style.background_color {
-                assert_eq!(grid.rows[line][column].background_color, background_color);
+                assert_eq!(
+                    grid.rows[line][column].background_color,
+                    Some(background_color)
+                );
             }
             if let Some(foreground_color) = expected_style.foreground_color {
                 assert_eq!(grid.rows[line][column].foreground_color, foreground_color);
