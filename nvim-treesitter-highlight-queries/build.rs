@@ -55,6 +55,7 @@ const INCLUDED_NVIM_TREESITTER_LANGUAGES: &[&str] = &[
     "php_only",
     "python",
     "perl",
+    "razor",
     "racket",
     "rescript",
     "roc",

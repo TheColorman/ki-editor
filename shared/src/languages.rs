@@ -70,6 +70,7 @@ pub fn languages() -> HashMap<String, Language> {
         ("php", php()),
         ("python", python()),
         ("perl", perl()),
+        ("razor", razor()),
         ("rescript", rescript()),
         ("roc", roc()),
         ("ruby", ruby()),
@@ -1053,6 +1054,19 @@ fn python() -> Language {
     }
 }
 
+fn razor() -> Language {
+    Language {
+        extensions: to_vec(&["cshtml"]),
+        lsp_language_id: Some(LanguageId::new("razor")),
+        tree_sitter_grammar_config: Some(GrammarConfig {
+            id: "razor".to_string(),
+            kind: GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Razor),
+        }),
+        block_comment_affixes: Some(("<!--".to_string(), "-->".to_string())),
+        ..Language::new()
+    }
+}
+
 fn perl() -> Language {
     Language {
         extensions: to_vec(&[
@@ -1432,6 +1446,18 @@ mod test {
         Query::new(
             &scss.tree_sitter_language().unwrap(),
             &scss.highlight_query().unwrap(),
+        )
+        .unwrap();
+
+        let razor = languages.get("razor").unwrap();
+        Query::new(
+            &razor.tree_sitter_language().unwrap(),
+            &razor.highlight_query().unwrap(),
+        )
+        .unwrap();
+        Query::new(
+            &razor.tree_sitter_language().unwrap(),
+            razor.injection_query().unwrap(),
         )
         .unwrap();
     }

@@ -111,6 +111,12 @@ const VUE_INJECTIONS_QUERY: &str = r#"
   (#set! injection.language "typescript"))
 "#;
 
+const RAZOR_INJECTIONS_QUERY: &str = r#"
+((element) @injection.content
+  (#set! injection.language "html")
+  (#set! injection.combined))
+"#;
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -217,6 +223,7 @@ pub enum CargoLinkedTreesitterLanguage {
     Hcl,
     Odin,
     CSharp,
+    Razor,
     Clojure,
     FSharp,
     Scala,
@@ -290,6 +297,7 @@ impl CargoLinkedTreesitterLanguage {
             CargoLinkedTreesitterLanguage::Hcl => tree_sitter_hcl::LANGUAGE.into(),
             CargoLinkedTreesitterLanguage::Odin => tree_sitter_odin::LANGUAGE.into(),
             CargoLinkedTreesitterLanguage::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            CargoLinkedTreesitterLanguage::Razor => tree_sitter_razor::LANGUAGE.into(),
             CargoLinkedTreesitterLanguage::Clojure => tree_sitter_clojure::LANGUAGE.into(),
             CargoLinkedTreesitterLanguage::FSharp => tree_sitter_fsharp::LANGUAGE_FSHARP.into(),
             CargoLinkedTreesitterLanguage::Scala => tree_sitter_scala::LANGUAGE.into(),
@@ -371,6 +379,7 @@ impl CargoLinkedTreesitterLanguage {
             CargoLinkedTreesitterLanguage::Hcl => None,
             CargoLinkedTreesitterLanguage::Odin => Some(tree_sitter_odin::HIGHLIGHTS_QUERY),
             CargoLinkedTreesitterLanguage::CSharp => None,
+            CargoLinkedTreesitterLanguage::Razor => None,
             CargoLinkedTreesitterLanguage::Clojure => None,
             CargoLinkedTreesitterLanguage::FSharp => Some(tree_sitter_fsharp::HIGHLIGHTS_QUERY),
             CargoLinkedTreesitterLanguage::Scala => Some(tree_sitter_scala::HIGHLIGHTS_QUERY),
@@ -411,6 +420,7 @@ impl CargoLinkedTreesitterLanguage {
     fn default_injection_query(&self) -> Option<&'static str> {
         match self {
             CargoLinkedTreesitterLanguage::Vue => Some(VUE_INJECTIONS_QUERY),
+            CargoLinkedTreesitterLanguage::Razor => Some(RAZOR_INJECTIONS_QUERY),
             _ => None,
         }
     }
@@ -791,6 +801,7 @@ impl Language {
             GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Vue) => {
                 vec!["javascript", "typescript", "tsx", "jsx", "css", "scss"]
             }
+            GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Razor) => vec!["html"],
             _ => Vec::new(),
         }
     }
