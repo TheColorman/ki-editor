@@ -1590,9 +1590,10 @@ mod test_buffer {
     use tempfile::tempdir;
 
     use crate::{
+        char_index_range::CharIndexRange,
         context::Context,
         grid::{IndexedHighlightGroup, StyleKey},
-        selection::SelectionSet,
+        selection::{CharIndex, Selection, SelectionSet},
         syntax_highlight::{HighlightedSpan, HighlightedSpans},
     };
 
@@ -1700,6 +1701,28 @@ class ObservationSpecification(Base):
             .map(|line| line.content)
             .collect_vec();
         pretty_assertions::assert_eq!(blank_line_parent_lines, expected);
+    }
+
+    #[test]
+    fn razor_html_elements_are_available_as_injected_syntax_trees() -> anyhow::Result<()> {
+        let source = r#"@if (Model.Count > 2) {
+  <div class="title">Hello</div>
+}
+"#;
+        let language = crate::config::from_extension("cshtml").unwrap();
+        let mut buffer = Buffer::new(language.tree_sitter_language(), source);
+        buffer.set_language(language)?;
+
+        let div_start = source.find("div").unwrap();
+        let selection = Selection::new(CharIndexRange {
+            start: CharIndex(div_start),
+            end: CharIndex(div_start + 1),
+        });
+        let layer = buffer.syntax_tree_layer_for_selection(&selection)?.unwrap();
+
+        assert!(layer.is_injected);
+        assert_eq!(layer.tree.root_node().kind(), "document");
+        Ok(())
     }
 
     mod replace {
