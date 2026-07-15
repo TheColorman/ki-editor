@@ -29,7 +29,7 @@ use shared::{absolute_path::AbsolutePath, language::Language};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use std::{cell::RefCell, collections::HashMap, ops::Range};
-use tree_sitter::{Node, Parser, Tree};
+use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
 use tree_sitter::{Point as TreeSitterPoint, Range as TreeSitterRange};
 #[cfg(test)]
 use tree_sitter_traversal2::{traverse, Order};
@@ -1109,23 +1109,72 @@ impl Buffer {
     }
 
     fn compute_injected_syntax_trees(&self) -> anyhow::Result<Vec<InjectedSyntaxTree>> {
-        if self
-            .language
-            .as_ref()
-            .and_then(|language| language.tree_sitter_grammar_id())
-            .as_deref()
-            != Some("vue")
-        {
+        let Some(language) = self.language.as_ref() else {
             return Ok(Vec::new());
-        }
+        };
         let Some(host_tree) = self.tree.as_ref() else {
             return Ok(Vec::new());
         };
 
         let source = self.rope.to_string();
         let mut injections = Vec::new();
-        self.collect_vue_injected_trees(host_tree.root_node(), &source, &mut injections)?;
+        if language.tree_sitter_grammar_id().as_deref() == Some("vue") {
+            self.collect_vue_injected_trees(host_tree.root_node(), &source, &mut injections)?;
+        } else {
+            self.collect_query_injected_trees(host_tree, &source, &mut injections)?;
+        }
         Ok(injections)
+    }
+
+    fn collect_query_injected_trees(
+        &self,
+        host_tree: &Tree,
+        source: &str,
+        result: &mut Vec<InjectedSyntaxTree>,
+    ) -> anyhow::Result<()> {
+        let Some(language) = self.language.as_ref() else {
+            return Ok(());
+        };
+        let Some(injection_query) = language.injection_query() else {
+            return Ok(());
+        };
+        let Some(tree_sitter_language) = language.tree_sitter_language() else {
+            return Ok(());
+        };
+        let query = Query::new(&tree_sitter_language, injection_query)?;
+        let Some(content_capture_index) = query.capture_index_for_name("injection.content") else {
+            return Ok(());
+        };
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, host_tree.root_node(), source.as_bytes());
+        while let Some(query_match) = matches.next() {
+            let Some(language_name) = query
+                .property_settings(query_match.pattern_index)
+                .iter()
+                .find(|property| {
+                    property.key.as_ref() == "injection.language" && property.capture_id.is_none()
+                })
+                .and_then(|property| property.value.as_deref())
+            else {
+                continue;
+            };
+
+            for capture in query_match
+                .captures
+                .iter()
+                .filter(|capture| capture.index == content_capture_index)
+            {
+                if let Some(tree) = self.parse_injected_tree(language_name, capture.node)? {
+                    result.push(InjectedSyntaxTree {
+                        byte_range: capture.node.byte_range(),
+                        tree,
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn collect_vue_injected_trees(
@@ -1613,9 +1662,10 @@ mod test_buffer {
     use tempfile::tempdir;
 
     use crate::{
+        char_index_range::CharIndexRange,
         context::Context,
         grid::{IndexedHighlightGroup, StyleKey},
-        selection::SelectionSet,
+        selection::{CharIndex, Selection, SelectionSet},
         syntax_highlight::{HighlightedSpan, HighlightedSpans},
     };
 
@@ -1723,6 +1773,28 @@ class ObservationSpecification(Base):
             .map(|line| line.content)
             .collect_vec();
         pretty_assertions::assert_eq!(blank_line_parent_lines, expected);
+    }
+
+    #[test]
+    fn razor_html_elements_are_available_as_injected_syntax_trees() -> anyhow::Result<()> {
+        let source = r#"@if (Model.Count > 2) {
+  <div class="title">Hello</div>
+}
+"#;
+        let language = crate::config::from_extension("cshtml").unwrap();
+        let mut buffer = Buffer::new(language.tree_sitter_language(), source);
+        buffer.set_language(language)?;
+
+        let div_start = source.find("div").unwrap();
+        let selection = Selection::new(CharIndexRange {
+            start: CharIndex(div_start),
+            end: CharIndex(div_start + 1),
+        });
+        let layer = buffer.syntax_tree_layer_for_selection(&selection)?.unwrap();
+
+        assert!(layer.is_injected);
+        assert_eq!(layer.tree.root_node().kind(), "document");
+        Ok(())
     }
 
     mod replace {
