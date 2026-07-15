@@ -540,6 +540,8 @@ mod test_language {
             Ok(())
         }
         run_test_case("hello.rs", "rust")?;
+        run_test_case("hello.cs", "c_sharp")?;
+        run_test_case("hello.cshtml", "razor")?;
         run_test_case("hello.vue", "vue")?;
         run_test_case("justfile", "just")?;
         Ok(())

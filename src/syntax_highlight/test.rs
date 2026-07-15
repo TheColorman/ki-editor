@@ -110,3 +110,25 @@ $theme-color: blue;
 
     Ok(())
 }
+
+#[test]
+fn syntax_highlight_razor_html_and_csharp() -> anyhow::Result<()> {
+    let source_code = r#"@model MyApp.Pages.IndexModel
+
+@if (Model.Count > 2) {
+  <div class="title">Hello</div>
+}
+"#;
+
+    let mut highlight_configs = HighlightConfigs::new();
+    let highlighted_spans = highlight_configs.highlight(
+        crate::config::from_extension("cshtml").unwrap(),
+        source_code,
+        &std::sync::atomic::AtomicUsize::new(0),
+    )?;
+
+    assert_substring_highlighted_as(source_code, &highlighted_spans, "if", "keyword.conditional");
+    assert_substring_highlighted_as(source_code, &highlighted_spans, "2", "number");
+
+    Ok(())
+}
