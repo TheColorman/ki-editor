@@ -1786,6 +1786,7 @@ impl<T: Frontend> App<T> {
             LspNotification::Initialized {
                 language,
                 server_id,
+                root,
             } => {
                 // Need to notify LSP that the file is opened
                 let opened_documents = self
@@ -1800,8 +1801,12 @@ impl<T: Frontend> App<T> {
                         }
                     })
                     .collect_vec();
-                self.lsp_manager()
-                    .initialized(*language, server_id, opened_documents);
+                let manager = self.lsp_manager();
+                let opened_documents = opened_documents
+                    .into_iter()
+                    .filter(|path| manager.lsp_root_for_path(&language, path) == root)
+                    .collect();
+                manager.initialized(*language, server_id, root, opened_documents);
                 Ok(())
             }
             LspNotification::PublishDiagnostics { server_id, params } => {
