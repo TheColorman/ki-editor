@@ -61,14 +61,25 @@ impl ProcessCommand {
     }
 
     pub fn spawn(&self) -> anyhow::Result<std::process::Child> {
-        self.spawn_inner(None)
+        self.spawn_inner(None, false)
     }
 
     pub fn spawn_in_directory(&self, directory: &Path) -> anyhow::Result<std::process::Child> {
-        self.spawn_inner(Some(directory))
+        self.spawn_inner(Some(directory), false)
     }
 
-    fn spawn_inner(&self, directory: Option<&Path>) -> anyhow::Result<std::process::Child> {
+    pub fn spawn_in_directory_in_new_process_group(
+        &self,
+        directory: &Path,
+    ) -> anyhow::Result<std::process::Child> {
+        self.spawn_inner(Some(directory), true)
+    }
+
+    fn spawn_inner(
+        &self,
+        directory: Option<&Path>,
+        new_process_group: bool,
+    ) -> anyhow::Result<std::process::Child> {
         log::info!(
             "ProcessCommand::spawn {:?} {:?} in {:?}",
             self.command,
@@ -92,15 +103,21 @@ impl ProcessCommand {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .envs(&self.environment)
-            .spawn()
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to spawn the command: {:?} with error: {:?}",
-                    self,
-                    e
-                )
-            })
+            .envs(&self.environment);
+        #[cfg(unix)]
+        if new_process_group {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        #[cfg(not(unix))]
+        let _ = new_process_group;
+        command.spawn().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to spawn the command: {:?} with error: {:?}",
+                self,
+                e
+            )
+        })
     }
 
     fn resolve_command(&self, directory: Option<&Path>) -> Option<PathBuf> {
