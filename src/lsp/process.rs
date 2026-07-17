@@ -268,6 +268,7 @@ enum LspServerProcessMessage {
     /// Throttled message should be executed immediately
     Throttled(FromEditor),
     Shutdown,
+    Exit,
 }
 
 #[derive(Debug, NamedVariant, Clone, PartialEq)]
@@ -387,7 +388,10 @@ impl LspServerProcessChannel {
 
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(_)) => {
+                    let _ = self.process_group.kill();
+                    return;
+                }
                 Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
                 Ok(None) => break,
                 Err(error) => {
@@ -873,7 +877,13 @@ impl LspServerProcess {
                             self.lsp_command(),
                             "LspServerProcess::process_messages: failed to shutdown due to {err:?}"
                         );
+                        break;
                     }
+                    if !self.is_initialized {
+                        break;
+                    }
+                }
+                LspServerProcessMessage::Exit => {
                     break;
                 }
             }
@@ -994,6 +1004,12 @@ impl LspServerProcess {
                         "Unable to get pending response requests for request ID {request_id:#?}"
                     )
                 })?;
+
+                if pending_response_request.method == "shutdown" {
+                    self.send_notification::<lsp_notification!("exit")>(())?;
+                    self.sender.send(LspServerProcessMessage::Exit)?;
+                    return Ok(());
+                }
 
                 // Parse the reply as a Response
                 let response = serde_json::from_value::<
@@ -1418,10 +1434,7 @@ impl LspServerProcess {
 
     pub fn shutdown(&mut self) -> anyhow::Result<()> {
         if self.is_initialized {
-            let shutdown =
-                self.send_request::<lsp_request!("shutdown")>(ResponseContext::default(), None, ());
-            let exit = self.send_notification::<lsp_notification!("exit")>(());
-            shutdown.and(exit)?;
+            self.send_request::<lsp_request!("shutdown")>(ResponseContext::default(), None, ())?;
         }
         Ok(())
     }
@@ -2277,7 +2290,7 @@ mod test_lsp_server_process {
         let tempdir = tempfile::tempdir()?;
         let child_pid_path = tempdir.path().join("child-pid");
         let script = format!(
-            "sleep 30 & child=$!; printf '%s' \"$child\" > {}; wait",
+            "sleep 30 & child=$!; printf '%s' \"$child\" > {}",
             child_pid_path.display()
         );
         let command =
@@ -2368,6 +2381,12 @@ mod test_lsp_server_process {
         };
 
         lsp_process.shutdown()?;
+        lsp_process.handle_reply(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": null
+        }))?;
+        assert!(matches!(_receiver.recv()?, LspServerProcessMessage::Exit));
         drop(lsp_process);
         child.wait()?;
         let messages = std::fs::read_to_string(messages_path)?;
