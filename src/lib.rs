@@ -66,7 +66,13 @@ pub mod transformation;
 pub mod ui_tree;
 mod utils;
 mod wakatime;
-use std::{rc::Rc, sync::Mutex};
+use std::{
+    fs::File,
+    io::Write,
+    path::Path,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Context;
 use frontend::crossterm::Crossterm;
@@ -86,14 +92,116 @@ pub struct RunConfig {
     pub working_directory: Option<AbsolutePath>,
 }
 
+const MAX_LOG_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(Clone)]
+struct BoundedLogFile {
+    file: Arc<Mutex<File>>,
+    max_bytes: u64,
+}
+
+impl BoundedLogFile {
+    fn open(path: &Path, max_bytes: u64) -> anyhow::Result<Self> {
+        Ok(Self {
+            file: Arc::new(Mutex::new(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .read(true)
+                    .open(path)?,
+            )),
+            max_bytes,
+        })
+    }
+
+    fn write_event(&self, event: &[u8]) -> std::io::Result<()> {
+        if event.len() as u64 > self.max_bytes {
+            return Ok(());
+        }
+
+        let mut file = self.file.lock().unwrap();
+        lock_file(&file)?;
+        let result = (|| {
+            if file.metadata()?.len() + event.len() as u64 > self.max_bytes {
+                file.set_len(0)?;
+            }
+            file.write_all(event)
+        })();
+        let unlock_result = unlock_file(&file);
+        result.and(unlock_result)
+    }
+}
+
+struct BoundedLogWriter {
+    log: BoundedLogFile,
+    event: Vec<u8>,
+}
+
+impl Write for BoundedLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.event.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for BoundedLogWriter {
+    fn drop(&mut self) {
+        if let Err(error) = self.log.write_event(&self.event) {
+            eprintln!("Failed to write Ki log: {error}");
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BoundedLogFile {
+    type Writer = BoundedLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        BoundedLogWriter {
+            log: self.clone(),
+            event: Vec::new(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn lock_file(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn unlock_file(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_file(_file: &File) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn unlock_file(_file: &File) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn init_logger() -> anyhow::Result<()> {
     use tracing_subscriber::prelude::*;
 
-    fn open_log_file(log_kind: LogKind) -> anyhow::Result<std::fs::File> {
-        Ok(std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_kind.as_path()?)?)
+    fn open_log_file(log_kind: LogKind) -> anyhow::Result<BoundedLogFile> {
+        BoundedLogFile::open(&log_kind.as_path()?, MAX_LOG_FILE_BYTES)
     }
 
     tracing_log::LogTracer::init()?;
@@ -168,4 +276,44 @@ pub fn run(config: RunConfig) -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("screen.run {:?}", error))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod bounded_log_tests {
+    use super::*;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[test]
+    fn log_file_is_truncated_before_exceeding_limit() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let path = tempdir.path().join("log");
+        let log = BoundedLogFile::open(&path, 32)?;
+
+        {
+            let mut writer = log.make_writer();
+            writer.write_all(b"aaaaaaaaaaaaaaaaaaaa")?;
+        }
+        {
+            let mut writer = log.make_writer();
+            writer.write_all(b"bbbbbbbbbbbbbbbbbbbb")?;
+        }
+
+        assert_eq!(std::fs::read(path)?, b"bbbbbbbbbbbbbbbbbbbb");
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_log_event_is_discarded() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let path = tempdir.path().join("log");
+        let log = BoundedLogFile::open(&path, 8)?;
+
+        {
+            let mut writer = log.make_writer();
+            writer.write_all(b"too large")?;
+        }
+
+        assert!(std::fs::read(path)?.is_empty());
+        Ok(())
+    }
 }
