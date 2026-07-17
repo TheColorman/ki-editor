@@ -23,6 +23,22 @@ fn is_package_workspace_root(path: &Path) -> bool {
     .any(|marker| path.join(marker).exists())
 }
 
+fn contains_file_with_extension(path: &Path, extensions: &[&str]) -> bool {
+    std::fs::read_dir(path).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extensions
+                        .iter()
+                        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+                })
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,7 +55,8 @@ mod tests {
 
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let manager = LspManager::new(sender, root);
-        let actual = manager.lsp_root_for_path(&app.join("app.vue").try_into()?);
+        let language = crate::config::from_extension("vue").unwrap();
+        let actual = manager.lsp_root_for_path(&language, &app.join("app.vue").try_into()?);
 
         assert_eq!(actual.as_ref(), frontend.as_path());
         Ok(())
@@ -57,15 +74,61 @@ mod tests {
 
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let manager = LspManager::new(sender, root);
-        let actual = manager.lsp_root_for_path(&app.join("app.vue").try_into()?);
+        let language = crate::config::from_extension("vue").unwrap();
+        let actual = manager.lsp_root_for_path(&language, &app.join("app.vue").try_into()?);
 
         assert_eq!(actual.as_ref(), frontend.as_path());
         Ok(())
     }
+
+    #[test]
+    fn csharp_lsp_root_prefers_solution_over_project() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let solution = tempdir.path().join("services/api");
+        let project = solution.join("src/App");
+        std::fs::create_dir_all(&project)?;
+        std::fs::write(solution.join("App.sln"), "")?;
+        std::fs::write(project.join("App.csproj"), "")?;
+        std::fs::write(project.join("Program.cs"), "")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let language = crate::config::from_extension("cs").unwrap();
+        let actual = manager.lsp_root_for_path(&language, &project.join("Program.cs").try_into()?);
+
+        assert_eq!(actual.as_ref(), solution);
+        Ok(())
+    }
+
+    #[test]
+    fn csharp_lsp_root_falls_back_to_nearest_project() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let project = tempdir.path().join("src/App");
+        std::fs::create_dir_all(&project)?;
+        std::fs::write(project.join("App.csproj"), "")?;
+        std::fs::write(project.join("Program.cs"), "")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let language = crate::config::from_extension("cs").unwrap();
+        let actual = manager.lsp_root_for_path(&language, &project.join("Program.cs").try_into()?);
+
+        assert_eq!(actual.as_ref(), project);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LspServerKey {
+    language_id: String,
+    server_id: String,
+    root: AbsolutePath,
 }
 
 pub struct LspManager {
-    lsp_server_process_channels: HashMap<String, LspServerProcessChannel>,
+    lsp_server_process_channels: HashMap<LspServerKey, LspServerProcessChannel>,
     sender: crossbeam_channel::Sender<AppMessage>,
     current_working_directory: AbsolutePath,
     #[cfg(test)]
@@ -101,20 +164,50 @@ impl LspManager {
         }
     }
 
-    fn server_key(language: &Language, server_id: &str) -> Option<String> {
-        Some(format!("{}:{server_id}", language.id()?))
+    fn server_key(
+        language: &Language,
+        server_id: &str,
+        root: AbsolutePath,
+    ) -> Option<LspServerKey> {
+        Some(LspServerKey {
+            language_id: language.id()?.to_string(),
+            server_id: server_id.to_string(),
+            root,
+        })
     }
 
-    fn lsp_root_for_path(&self, path: &AbsolutePath) -> AbsolutePath {
+    pub(crate) fn lsp_root_for_path(
+        &self,
+        language: &Language,
+        path: &AbsolutePath,
+    ) -> AbsolutePath {
         let file_parent = path.as_ref().parent().unwrap_or(path.as_ref());
         let boundary = self.current_working_directory.as_ref();
         let mut nearest_package_root = None::<PathBuf>;
+        let mut nearest_csharp_project = None::<PathBuf>;
+        let is_csharp = language.tree_sitter_grammar_id().as_deref() == Some("c_sharp");
 
         for ancestor in file_parent.ancestors() {
+            if is_csharp {
+                if contains_file_with_extension(ancestor, &["sln", "slnx"]) {
+                    return ancestor
+                        .try_into()
+                        .unwrap_or_else(|_| self.current_working_directory.clone());
+                }
+                if nearest_csharp_project.is_none()
+                    && contains_file_with_extension(ancestor, &["csproj"])
+                {
+                    nearest_csharp_project = Some(ancestor.to_path_buf());
+                }
+            }
             if is_package_workspace_root(ancestor) {
-                return ancestor
-                    .try_into()
-                    .unwrap_or_else(|_| self.current_working_directory.clone());
+                if is_csharp {
+                    nearest_package_root.get_or_insert_with(|| ancestor.to_path_buf());
+                } else {
+                    return ancestor
+                        .try_into()
+                        .unwrap_or_else(|_| self.current_working_directory.clone());
+                }
             }
             if nearest_package_root.is_none() && ancestor.join("package.json").exists() {
                 nearest_package_root = Some(ancestor.to_path_buf());
@@ -124,7 +217,8 @@ impl LspManager {
             }
         }
 
-        nearest_package_root
+        nearest_csharp_project
+            .or(nearest_package_root)
             .and_then(|path| path.as_path().try_into().ok())
             .unwrap_or_else(|| self.current_working_directory.clone())
     }
@@ -211,6 +305,7 @@ impl LspManager {
             return Ok(());
         };
         let configs = language.lsp_server_configs();
+        let root = self.lsp_root_for_path(&language, path);
         let configs = if Self::is_lifecycle_message(from_editor) {
             configs
         } else {
@@ -221,7 +316,7 @@ impl LspManager {
         };
 
         for config in configs {
-            if let Some(channel) = Self::server_key(&language, config.id())
+            if let Some(channel) = Self::server_key(&language, config.id(), root.clone())
                 .and_then(|key| self.lsp_server_process_channels.get(&key))
             {
                 f(channel)?;
@@ -254,8 +349,9 @@ impl LspManager {
         };
 
         for config in language.lsp_server_configs() {
-            let lsp_root = self.lsp_root_for_path(&path);
-            let Some(server_key) = Self::server_key(&language, config.id()) else {
+            let lsp_root = self.lsp_root_for_path(&language, &path);
+            let Some(server_key) = Self::server_key(&language, config.id(), lsp_root.clone())
+            else {
                 continue;
             };
             if let Some(channel) = self.lsp_server_process_channels.get(&server_key) {
@@ -302,15 +398,18 @@ impl LspManager {
         &mut self,
         language: Language,
         server_id: String,
+        root: AbsolutePath,
         opened_documents: Vec<AbsolutePath>,
     ) {
-        let Some(server_key) = Self::server_key(&language, &server_id) else {
+        let Some(server_key) = Self::server_key(&language, &server_id, root) else {
             return;
         };
 
         #[cfg(test)]
-        self.lsp_server_initialized_args_history
-            .push((server_key.clone(), opened_documents.clone()));
+        self.lsp_server_initialized_args_history.push((
+            format!("{}:{}", server_key.language_id, server_key.server_id),
+            opened_documents.clone(),
+        ));
 
         self.lsp_server_process_channels
             .get_mut(&server_key)

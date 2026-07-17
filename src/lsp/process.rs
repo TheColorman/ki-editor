@@ -201,6 +201,7 @@ pub enum LspNotification {
     Initialized {
         language: Box<Language>,
         server_id: String,
+        root: AbsolutePath,
     },
     PublishDiagnostics {
         server_id: String,
@@ -485,6 +486,7 @@ impl LspServerProcess {
         }))
     }
 
+    #[allow(deprecated)]
     fn initialize(&mut self) -> anyhow::Result<()> {
         self.send_request::<lsp_request!("initialize")>(
             ResponseContext::default(),
@@ -611,11 +613,13 @@ impl LspServerProcess {
                     }),
                     ..ClientCapabilities::default()
                 },
+                root_uri: Some(
+                    Url::from_file_path(self.current_working_directory.as_ref())
+                        .map_err(|_| anyhow::anyhow!("Unable to create LSP root URI"))?,
+                ),
                 workspace_folders: Some(vec![WorkspaceFolder {
-                    uri: Url::parse(&format!(
-                        "file://{}",
-                        self.current_working_directory.display_absolute()
-                    ))?,
+                    uri: Url::from_file_path(self.current_working_directory.as_ref())
+                        .map_err(|_| anyhow::anyhow!("Unable to create LSP workspace URI"))?,
                     name: "root".to_string(),
                 }]),
                 ..InitializeParams::default()
@@ -996,6 +1000,7 @@ impl LspServerProcess {
                                 LspNotification::Initialized {
                                     language: Box::new(self.language.clone()),
                                     server_id: self.server_config.id().to_string(),
+                                    root: self.current_working_directory.clone(),
                                 },
                             )))?;
                     }

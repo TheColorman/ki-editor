@@ -283,7 +283,7 @@ fn c_sharp() -> Language {
             command: Command::new("omnisharp", &["--languageserver"]),
             ..LspCommand::default()
         }),
-        lsp_language_id: Some(LanguageId::new("c_sharp")),
+        lsp_language_id: Some(LanguageId::new("csharp")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "c_sharp".to_string(),
             kind: GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::CSharp),
