@@ -2214,13 +2214,10 @@ impl<T: Frontend> App<T> {
 
     /// Restarts the LSP server responsible for the current buffer's language, if any.
     fn restart_lsp(&mut self) -> anyhow::Result<()> {
-        let Some(language) = self
-            .get_current_file_path()
-            .and_then(|path| crate::config::from_path(&path))
-        else {
+        let Some(path) = self.get_current_file_path() else {
             return Ok(());
         };
-        self.lsp_manager().restart_language(&language)
+        self.lsp_manager().restart(&path)
     }
 
     /// Reloads every open buffer whose file has changed on disk.

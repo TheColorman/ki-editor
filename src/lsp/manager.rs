@@ -1,12 +1,13 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use crate::app::AppMessage;
 use crate::lsp::server_config::resolve_configured_path;
 
-use super::process::{FromEditor, LspNotification, LspServerProcessChannel};
+use super::process::{FromEditor, LspServerProcessChannel};
 use shared::{absolute_path::AbsolutePath, language::Language};
 
 fn is_package_workspace_root(path: &Path) -> bool {
@@ -420,49 +421,54 @@ impl LspManager {
     }
 
     pub fn shutdown(&mut self) {
-        for (_, channel) in self.lsp_server_process_channels.drain() {
+        let channels = self
+            .lsp_server_process_channels
+            .drain()
+            .map(|(_, channel)| channel)
+            .collect::<Vec<_>>();
+        for channel in &channels {
             channel
-                .shutdown()
+                .request_shutdown()
                 .unwrap_or_else(|error| log::error!("{error:?}"));
+        }
+        let deadline = Instant::now() + Duration::from_millis(500);
+        for channel in channels {
+            channel.wait_for_exit_until(deadline);
         }
     }
 
-    /// Restarts the LSP server process for the given `language`, if one is running.
-    ///
-    /// The existing process (if any) is shut down and a fresh one is spawned.
-    /// Once the new process reports that it is initialized, `documents_did_open`
-    /// will be replayed for currently open buffers (see `App::handle_lsp_notification`),
-    /// so callers do not need to re-open any documents themselves.
-    pub fn restart_language(&mut self, language: &Language) -> anyhow::Result<()> {
+    /// Restarts the LSP servers responsible for `path`.
+    pub fn restart(&mut self, path: &AbsolutePath) -> anyhow::Result<()> {
+        let Some(language) = crate::config::from_path(path) else {
+            return Ok(());
+        };
         let Some(language_id) = language.id() else {
             return Ok(());
         };
+        let language_id = language_id.to_string();
+        let root = self.lsp_root_for_path(&language, path);
+        let keys = self
+            .lsp_server_process_channels
+            .keys()
+            .filter(|key| key.language_id == language_id && key.root == root)
+            .cloned()
+            .collect::<Vec<_>>();
+        let channels = keys
+            .into_iter()
+            .filter_map(|key| self.lsp_server_process_channels.remove(&key))
+            .collect::<Vec<_>>();
 
-        if let Some(channel) = self.lsp_server_process_channels.remove(&language_id) {
-            // `shutdown` blocks until the old process has actually stopped (or failed
-            // to), so a failure is reported here before the replacement process is
-            // spawned below, rather than racing with it. Success is not reported —
-            // it's the expected outcome and not worth surfacing to the user.
-            if let Err(error) = channel.shutdown() {
-                let _ = self.sender.send(AppMessage::LspNotification(Box::new(
-                    LspNotification::Error(format!(
-                        "LSP server for {language_id} failed to shut down cleanly: {error:?}"
-                    )),
-                )));
-            }
+        for channel in &channels {
+            channel
+                .request_shutdown()
+                .unwrap_or_else(|error| log::error!("{error:?}"));
+        }
+        let deadline = Instant::now() + Duration::from_millis(500);
+        for channel in channels {
+            channel.wait_for_exit_until(deadline);
         }
 
-        LspServerProcessChannel::new(
-            language.clone(),
-            self.sender.clone(),
-            self.current_working_directory.clone(),
-        )
-        .map(|channel| {
-            if let Some(channel) = channel {
-                self.lsp_server_process_channels
-                    .insert(language_id, channel);
-            }
-        })
+        self.open_file(path.clone())
     }
 
     #[cfg(test)]
