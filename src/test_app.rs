@@ -2553,6 +2553,7 @@ fn code_action() -> anyhow::Result<()> {
             edit: Some(WorkspaceEdit {
                 edits: [TextDocumentEdit {
                     path: s.main_rs(),
+                    version: None,
                     edits: [PositionalEdit {
                         range: Position::new(0, 2)..Position::new(0, 6),
                         new_text: new_text.to_string(),
@@ -3012,6 +3013,7 @@ fn workspace_edit() -> anyhow::Result<()> {
             App(Dispatch::ApplyWorkspaceEdit(WorkspaceEdit {
                 edits: [TextDocumentEdit {
                     path: s.main_rs(),
+                    version: None,
                     edits: [PositionalEdit {
                         range: Position::new(0, 0)..Position::new(0, 0),
                         new_text: "hello ".to_string(),
@@ -3562,6 +3564,7 @@ fn unmark_file_focuses_next_marked_file_if_other_marked_files_exists() -> anyhow
 #[test]
 fn close_buffer_should_remove_mark() -> anyhow::Result<()> {
     execute_test(|s| {
+        let foo_rs = s.foo_rs();
         Box::new([
             App(OpenFile {
                 path: s.main_rs(),
@@ -3576,8 +3579,36 @@ fn close_buffer_should_remove_mark() -> anyhow::Result<()> {
             }),
             App(ToggleFileMark),
             App(CloseCurrentWindow),
+            Expect(LspRequestSent(FromEditor::TextDocumentDidClose {
+                file_path: foo_rs,
+            })),
             App(CycleMarkedFile(Movement::Right)),
             Expect(CurrentComponentPath(Some(s.main_rs()))),
+        ])
+    })
+}
+
+#[test]
+fn lsp_document_version_increments_for_each_change() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent("first".to_string())),
+            Expect(LspRequestSent(FromEditor::TextDocumentDidChange {
+                file_path: s.main_rs(),
+                version: 2,
+                content: "first".to_string(),
+            })),
+            Editor(SetContent("second".to_string())),
+            Expect(LspRequestSent(FromEditor::TextDocumentDidChange {
+                file_path: s.main_rs(),
+                version: 3,
+                content: "second".to_string(),
+            })),
         ])
     })
 }
