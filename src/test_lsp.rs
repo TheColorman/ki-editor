@@ -18,6 +18,41 @@ use crate::{
 };
 
 #[test]
+#[ignore = "requires jdtls and Java 21"]
+fn java_jdtls_initializes_and_completes() -> Result<(), anyhow::Error> {
+    let options = RunTestOptions {
+        enable_lsp: true,
+        enable_syntax_highlighting: false,
+        enable_file_watcher: false,
+    };
+    execute_test_custom(options, |s| {
+        Box::new([
+            App(AddPath(s.new_path("Main.java").display().to_string())),
+            App(HandleKeyEvent(key!("enter"))),
+            Editor(SetContent(
+                r#"public class Main {
+    public static void main(String[] args) {
+        System.out.pr
+    }
+}"#
+                .to_string(),
+            )),
+            Expect(AppMessageIsReceived {
+                matches: regex!("LspNotification.*Initialized"),
+                timeout: Duration::from_secs(30),
+            }),
+            Editor(MatchLiteral("pr".to_string())),
+            Editor(EnterInsertMode(Direction::End)),
+            App(Dispatch::RequestCompletion),
+            Expect(AppMessageIsReceived {
+                matches: regex!("LspNotification.*Completion"),
+                timeout: Duration::from_secs(30),
+            }),
+        ])
+    })
+}
+
+#[test]
 fn rust_lsp_auto_import_from_completion_item() -> Result<(), anyhow::Error> {
     let options = RunTestOptions {
         enable_lsp: true,
