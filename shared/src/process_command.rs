@@ -55,6 +55,10 @@ impl ProcessCommand {
         &self.command
     }
 
+    pub fn arguments(&self) -> &[String] {
+        &self.args
+    }
+
     /// Returns `true` if `self.command` can be located on `$PATH`.
     pub fn is_command_found(&self) -> bool {
         which::which(&self.command).is_ok()

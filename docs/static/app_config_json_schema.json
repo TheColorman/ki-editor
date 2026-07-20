@@ -132,6 +132,7 @@
                 "CSharp",
                 "Clojure",
                 "FSharp",
+                "Java",
                 "Scala",
                 "Glsl",
                 "Devicetree",
