@@ -2230,10 +2230,20 @@ impl<T: Frontend> App<T> {
 
     /// Restarts the LSP server responsible for the current buffer's language, if any.
     fn restart_lsp(&mut self) -> anyhow::Result<()> {
-        let Some(path) = self.get_current_file_path() else {
-            return Ok(());
+        let document = {
+            let component = self.current_component();
+            let component = component.borrow();
+            let buffer = component.editor().buffer();
+            let Some(path) = buffer.path() else {
+                return Ok(());
+            };
+            OpenDocument {
+                path,
+                version: buffer.lsp_document_version(),
+                content: buffer.content(),
+            }
         };
-        self.lsp_manager().restart(&path)
+        self.lsp_manager().restart(document)
     }
 
     /// Reloads every open buffer whose file has changed on disk.

@@ -754,8 +754,9 @@ impl LspManager {
         }
     }
 
-    /// Restarts the LSP servers responsible for `path`.
-    pub fn restart(&mut self, path: &AbsolutePath) -> anyhow::Result<()> {
+    /// Restarts the LSP servers responsible for `document`.
+    pub fn restart(&mut self, document: OpenDocument) -> anyhow::Result<()> {
+        let path = &document.path;
         let Some(language) = crate::config::from_path(path) else {
             return Ok(());
         };
@@ -785,7 +786,7 @@ impl LspManager {
             channel.wait_for_exit_until(deadline);
         }
 
-        self.open_file(path.clone())
+        self.open_file(document)
     }
 
     #[cfg(test)]
