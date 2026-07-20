@@ -6,20 +6,20 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serde_json.workspace = true
-serde_path_to_error = "0.1.20"
-tree-sitter.workspace = true
 anyhow.workspace = true
-serde.workspace = true
+etcetera = "0.8"
+grammar = {path = "../grammar"}
+itertools.workspace = true
+log.workspace = true
 lsp-types.workspace = true
 regex.workspace = true
-log.workspace = true
-grammar = {path = "../grammar"}
+schemars.workspace = true
+serde_json.workspace = true
+serde_path_to_error = "0.1.20"
+serde.workspace = true
+tree-sitter.workspace = true
 url = "2.5.0"
 which = "~7.0.0"
-etcetera = "0.8"
-itertools.workspace = true
-schemars.workspace = true
 
 # Tree sitter grammars
 arborium-dockerfile = "2.18.1"
@@ -70,10 +70,10 @@ tree-sitter-python = "0.23.6"
 tree-sitter-qmldir = { git = "https://github.com/tree-sitter-grammars/tree-sitter-qmldir", rev = "1fa9200" }
 tree-sitter-qmljs = "0.3.0"
 tree-sitter-quickfix.workspace = true
+tree-sitter-razor = "0.1.0"
 tree-sitter-roc = { git = "https://git.sr.ht/~jwoudenberg/tree-sitter-roc", rev = "5758e4bc" }
 tree-sitter-ruby = "0.23.1"
 tree-sitter-rust = "0.24.0"
-tree-sitter-razor = "0.1.0"
 tree-sitter-scala = "0.25.0"
 tree-sitter-scheme = "0.24.7"
 tree-sitter-scss = "1.0.0"
@@ -90,6 +90,6 @@ tree-sitter-zsh = "0.63.3"
 ts-parser-perl = "1.2.1"
 
 [dev-dependencies]
-quickcheck.workspace = true
 quickcheck_macros.workspace = true
+quickcheck.workspace = true
 tempfile.workspace = true
