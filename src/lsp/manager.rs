@@ -7,7 +7,7 @@ use std::{
 use crate::app::AppMessage;
 use crate::lsp::server_config::resolve_configured_path;
 
-use super::process::{FromEditor, LspServerProcessChannel};
+use super::process::{FromEditor, LspServerProcessChannel, OpenDocument};
 use shared::{absolute_path::AbsolutePath, language::Language};
 
 fn is_package_workspace_root(path: &Path) -> bool {
@@ -82,6 +82,15 @@ fn contains_file_with_extension(path: &Path, extensions: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn did_close_is_a_lifecycle_message() -> anyhow::Result<()> {
+        let path = std::env::current_dir()?.try_into()?;
+        assert!(LspManager::is_lifecycle_message(
+            &FromEditor::TextDocumentDidClose { file_path: path }
+        ));
+        Ok(())
+    }
 
     #[test]
     fn lsp_root_prefers_nested_package_workspace_root() -> anyhow::Result<()> {
@@ -546,6 +555,7 @@ impl LspManager {
             from_editor,
             FromEditor::TextDocumentDidOpen { .. }
                 | FromEditor::TextDocumentDidChange { .. }
+                | FromEditor::TextDocumentDidClose { .. }
                 | FromEditor::TextDocumentDidSave { .. }
                 | FromEditor::WorkspaceDidRenameFiles { .. }
                 | FromEditor::WorkspaceDidCreateFiles { .. }
@@ -661,20 +671,44 @@ impl LspManager {
     /// 1. Start a new LSP server process if it is not started yet.
     /// 2. Notify the LSP server process that a new file is opened.
     /// 3. Do nothing if the LSP server process is spawned but not yet initialized.
-    pub fn open_file(&mut self, path: AbsolutePath) -> Result<(), anyhow::Error> {
-        let Some(language) = crate::config::from_path(&path) else {
+    pub fn open_file(&mut self, document: OpenDocument) -> Result<(), anyhow::Error> {
+        self.open_file_inner(document, true)
+    }
+
+    pub fn ensure_file_server(&mut self, document: OpenDocument) -> Result<(), anyhow::Error> {
+        self.open_file_inner(document, false)
+    }
+
+    fn open_file_inner(
+        &mut self,
+        document: OpenDocument,
+        notify_healthy_server: bool,
+    ) -> Result<(), anyhow::Error> {
+        let path = &document.path;
+        let Some(language) = crate::config::from_path(path) else {
             return Ok(());
         };
 
         for config in language.lsp_server_configs() {
-            let lsp_root = self.lsp_root_for_path(&language, &path);
+            let lsp_root = self.lsp_root_for_path(&language, path);
             let Some(server_key) = Self::server_key(&language, config.id(), lsp_root.clone())
             else {
                 continue;
             };
+            let server_exited = self
+                .lsp_server_process_channels
+                .get_mut(&server_key)
+                .is_some_and(|channel| !channel.is_running());
+            if server_exited {
+                log::warn!(
+                    "Removing exited LSP server '{}' for root {lsp_root:?}",
+                    config.id()
+                );
+                self.lsp_server_process_channels.remove(&server_key);
+            }
             if let Some(channel) = self.lsp_server_process_channels.get(&server_key) {
-                if channel.is_initialized() {
-                    channel.document_did_open(path.clone())?;
+                if notify_healthy_server && channel.is_initialized() {
+                    channel.document_did_open(document.clone())?;
                 }
             } else {
                 let is_primary = config.primary();
@@ -717,7 +751,7 @@ impl LspManager {
         language: Language,
         server_id: String,
         root: AbsolutePath,
-        opened_documents: Vec<AbsolutePath>,
+        opened_documents: Vec<OpenDocument>,
     ) {
         let Some(server_key) = Self::server_key(&language, &server_id, root) else {
             return;
@@ -726,7 +760,10 @@ impl LspManager {
         #[cfg(test)]
         self.lsp_server_initialized_args_history.push((
             format!("{}:{}", server_key.language_id, server_key.server_id),
-            opened_documents.clone(),
+            opened_documents
+                .iter()
+                .map(|document| document.path.clone())
+                .collect(),
         ));
 
         self.lsp_server_process_channels

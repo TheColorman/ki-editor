@@ -92,7 +92,13 @@ impl Layout {
     pub fn remove_current_component(&mut self, context: &Context) -> Option<AbsolutePath> {
         let node = self.tree.get_current_node();
         let removed_path = node.data().component().borrow().path();
-        if let Some(path) = &removed_path {
+        let component_id = node.data().component().borrow().id();
+        let removed_registered_path = removed_path.filter(|path| {
+            self.background_suggestive_editors
+                .get(path)
+                .is_some_and(|editor| editor.borrow().id() == component_id)
+        });
+        if let Some(path) = &removed_registered_path {
             if let Some(last) = &self.last_focused_suggestive_editor {
                 if last.borrow().editor().path().as_ref() == Some(path) {
                     self.last_focused_suggestive_editor = None;
@@ -133,7 +139,7 @@ impl Layout {
         };
 
         self.recalculate_layout(context);
-        removed_path
+        removed_registered_path
     }
 
     pub fn cycle_window(&mut self) {
