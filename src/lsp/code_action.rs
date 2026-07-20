@@ -31,6 +31,17 @@ impl From<lsp_types::Command> for Command {
     }
 }
 
+impl From<lsp_types::Command> for CodeAction {
+    fn from(command: lsp_types::Command) -> Self {
+        Self {
+            title: command.title.clone(),
+            kind: None,
+            edit: None,
+            command: Some(command.into()),
+        }
+    }
+}
+
 impl PartialEq for Command {
     fn eq(&self, other: &Self) -> bool {
         self.0.command.eq(&other.0.command)
@@ -93,5 +104,26 @@ impl TryFrom<lsp_types::CodeAction> for CodeAction {
             edit: value.edit.map(WorkspaceEdit::try_from).transpose()?,
             command: value.command.map(Command),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_only_action_is_executable() {
+        let action = CodeAction::from(lsp_types::Command {
+            title: "Organize imports".to_string(),
+            command: "java.edit.organizeImports".to_string(),
+            arguments: None,
+        });
+
+        assert_eq!(action.title, "Organize imports");
+        assert!(action.edit.is_none());
+        assert_eq!(
+            action.command.unwrap().command(),
+            "java.edit.organizeImports"
+        );
     }
 }

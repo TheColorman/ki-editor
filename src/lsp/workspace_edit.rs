@@ -50,6 +50,7 @@ impl TryFrom<lsp_types::WorkspaceEdit> for WorkspaceEdit {
                     .map(|(url, edits)| {
                         Ok(TextDocumentEdit {
                             path: url.try_into()?,
+                            version: None,
                             edits: edits
                                 .into_iter()
                                 .map(|edit| edit.try_into())
@@ -110,6 +111,7 @@ impl TryFrom<lsp_types::TextDocumentEdit> for TextDocumentEdit {
         let path = value.text_document.uri.try_into()?;
         Ok(TextDocumentEdit {
             path,
+            version: value.text_document.version,
             edits: value
                 .edits
                 .into_iter()
@@ -129,5 +131,6 @@ impl TryFrom<lsp_types::TextDocumentEdit> for TextDocumentEdit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextDocumentEdit {
     pub path: AbsolutePath,
+    pub version: Option<i32>,
     pub edits: Vec<PositionalEdit>,
 }

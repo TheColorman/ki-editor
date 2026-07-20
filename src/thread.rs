@@ -5,6 +5,12 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct Callback<T>(Arc<dyn Fn(T) + Send + Sync>);
 
+impl<T> std::fmt::Debug for Callback<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_tuple("Callback").finish()
+    }
+}
+
 impl<T> PartialEq for Callback<T> {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
