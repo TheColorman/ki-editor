@@ -258,7 +258,15 @@ pub enum LspNotification {
     References(ResponseContext, Vec<Location>),
     PrepareRenameResponse(PrepareRenameResponse),
     Error(String),
-    WorkspaceEdit(WorkspaceEdit),
+    WorkspaceEdit {
+        edit: WorkspaceEdit,
+        respond: Option<Callback<Result<(), String>>>,
+    },
+    ShowMessage {
+        server_id: String,
+        typ: MessageType,
+        message: String,
+    },
     CodeAction(Vec<CodeAction>),
     SignatureHelp(Option<SignatureHelp>),
     DocumentSymbols(Symbols),
@@ -286,12 +294,23 @@ impl ResponseContext {
 }
 
 #[derive(Debug, Clone)]
+pub struct OpenDocument {
+    pub path: AbsolutePath,
+    pub version: i32,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
 enum LspServerProcessMessage {
     FromLspServer(serde_json::Value),
     /// This message might be throttled depending on its variant
     FromEditor(FromEditor),
     /// Throttled message should be executed immediately
     Throttled(FromEditor),
+    WorkspaceEditResponse {
+        id: Option<json_rpc_types::Id>,
+        result: Result<(), String>,
+    },
     Shutdown,
     Exit,
 }
@@ -308,13 +327,16 @@ pub enum FromEditor {
     TextDocumentDidOpen {
         file_path: AbsolutePath,
         language_id: String,
-        version: usize,
+        version: i32,
         content: String,
     },
     TextDocumentDidChange {
         file_path: AbsolutePath,
         version: i32,
         content: String,
+    },
+    TextDocumentDidClose {
+        file_path: AbsolutePath,
     },
     TextDocumentDidSave {
         file_path: AbsolutePath,
@@ -407,6 +429,12 @@ impl LspServerProcessChannel {
             .map_err(|err| anyhow::anyhow!("Unable to send shutdown: {err}"))
     }
 
+    pub fn is_running(&mut self) -> bool {
+        self.child
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    }
+
     pub fn wait_for_exit_until(mut self, deadline: Instant) {
         let Some(mut child) = self.child.take() else {
             return;
@@ -445,18 +473,20 @@ impl LspServerProcessChannel {
             .map_err(|err| anyhow::anyhow!("Unable to send request: {}", err))
     }
 
-    pub fn documents_did_open(&mut self, paths: Vec<AbsolutePath>) -> Result<(), anyhow::Error> {
+    pub fn documents_did_open(
+        &mut self,
+        documents: Vec<OpenDocument>,
+    ) -> Result<(), anyhow::Error> {
         consolidate_errors(
             "[documents_did_open]",
-            paths
+            documents
                 .into_iter()
-                .map(|path| self.document_did_open(path))
+                .map(|document| self.document_did_open(document))
                 .collect(),
         )
     }
 
-    pub fn document_did_open(&self, path: AbsolutePath) -> Result<(), anyhow::Error> {
-        let content = path.read()?;
+    pub fn document_did_open(&self, document: OpenDocument) -> Result<(), anyhow::Error> {
         let Some(language_id) = self
             .server_config
             .language_id()
@@ -466,10 +496,10 @@ impl LspServerProcessChannel {
         };
         self.send(LspServerProcessMessage::FromEditor(
             FromEditor::TextDocumentDidOpen {
-                file_path: path,
+                file_path: document.path,
                 language_id: language_id.to_string(),
-                version: 1,
-                content,
+                version: document.version,
+                content: document.content,
             },
         ))
     }
@@ -688,11 +718,11 @@ impl LspServerProcess {
                             ..Default::default()
                         }),
                         declaration: Some(GotoCapability {
-                            dynamic_registration: Some(true),
+                            dynamic_registration: Some(false),
                             link_support: None,
                         }),
                         call_hierarchy: Some(CallHierarchyClientCapabilities {
-                            dynamic_registration: Some(true),
+                            dynamic_registration: Some(false),
                         }),
                         ..TextDocumentClientCapabilities::default()
                     }),
@@ -903,6 +933,29 @@ impl LspServerProcess {
                 },
                 LspServerProcessMessage::Throttled(from_editor) => {
                     self.handle_from_editor(from_editor);
+                }
+                LspServerProcessMessage::WorkspaceEditResponse { id, result } => {
+                    let response = match result {
+                        Ok(()) => ApplyWorkspaceEditResponse {
+                            applied: true,
+                            failure_reason: None,
+                            failed_change: None,
+                        },
+                        Err(error) => ApplyWorkspaceEditResponse {
+                            applied: false,
+                            failure_reason: Some(error.clone()),
+                            failed_change: None,
+                        },
+                    };
+                    if let Err(error) = self.send_reply(
+                        id.clone(),
+                        serde_json::to_value(response).unwrap_or(serde_json::Value::Null),
+                    ) {
+                        lsp_error!(
+                            self.lsp_command(),
+                            "Failed to respond to workspace/applyEdit: {error:?}"
+                        );
+                    }
                 }
                 LspServerProcessMessage::Shutdown => {
                     if let Err(err) = self.shutdown() {
@@ -1231,7 +1284,10 @@ impl LspServerProcess {
 
                         if let Some(payload) = payload {
                             self.send_to_app(AppMessage::LspNotification(Box::new(
-                                LspNotification::WorkspaceEdit(payload.try_into()?),
+                                LspNotification::WorkspaceEdit {
+                                    edit: payload.try_into()?,
+                                    respond: None,
+                                },
                             )));
                         }
                     }
@@ -1245,7 +1301,9 @@ impl LspServerProcess {
                                     payload
                                         .into_iter()
                                         .map(|r| match r {
-                                            CodeActionOrCommand::Command(_) => todo!(),
+                                            CodeActionOrCommand::Command(command) => {
+                                                Ok(command.into())
+                                            }
                                             CodeActionOrCommand::CodeAction(code_action) => {
                                                 code_action.try_into()
                                             }
@@ -1392,9 +1450,34 @@ impl LspServerProcess {
                                     "Unable to obtain request.params from request {request:#?}"
                                 )
                             })?)?;
+                        let edit = match WorkspaceEdit::try_from(params.edit) {
+                            Ok(edit) => edit,
+                            Err(error) => {
+                                self.send_reply(
+                                    request.id,
+                                    serde_json::to_value(ApplyWorkspaceEditResponse {
+                                        applied: false,
+                                        failure_reason: Some(error.to_string()),
+                                        failed_change: None,
+                                    })?,
+                                )?;
+                                return Ok(());
+                            }
+                        };
 
+                        let sender = self.sender.clone();
+                        let id = request.id.clone();
+                        let respond = Callback::new(Arc::new(move |result| {
+                            let _ = sender.send(LspServerProcessMessage::WorkspaceEditResponse {
+                                id: id.clone(),
+                                result,
+                            });
+                        }));
                         self.send_to_app(AppMessage::LspNotification(Box::new(
-                            LspNotification::WorkspaceEdit(params.edit.try_into()?),
+                            LspNotification::WorkspaceEdit {
+                                edit,
+                                respond: Some(respond),
+                            },
                         )));
                     }
                     "workspace/configuration" => {
@@ -1417,6 +1500,42 @@ impl LspServerProcess {
                         // This reply is necessary for the Go LSP (gopls) to work
                         // Null as the response is fine but maybe this should be handled properly
                         self.send_reply(request.id, serde_json::Value::Null)?;
+                    }
+                    "window/showMessage" => {
+                        let params: ShowMessageParams = serde_json::from_value(
+                            request
+                                .params
+                                .ok_or_else(|| anyhow::anyhow!("Missing params"))?,
+                        )?;
+                        self.send_to_app(AppMessage::LspNotification(Box::new(
+                            LspNotification::ShowMessage {
+                                server_id: self.server_config.id().to_string(),
+                                typ: params.typ,
+                                message: params.message,
+                            },
+                        )));
+                    }
+                    "window/showMessageRequest" => {
+                        let params: ShowMessageRequestParams = serde_json::from_value(
+                            request
+                                .params
+                                .ok_or_else(|| anyhow::anyhow!("Missing params"))?,
+                        )?;
+                        self.send_to_app(AppMessage::LspNotification(Box::new(
+                            LspNotification::ShowMessage {
+                                server_id: self.server_config.id().to_string(),
+                                typ: params.typ,
+                                message: params.message,
+                            },
+                        )));
+                        self.send_reply(request.id, serde_json::Value::Null)?;
+                    }
+                    "client/registerCapability" | "client/unregisterCapability" => {
+                        self.send_error_reply(
+                            request.id,
+                            -32601,
+                            "Ki does not support dynamic LSP capability registration",
+                        )?;
                     }
                     "window/logMessage" => {
                         let params: <lsp_notification!("window/logMessage") as Notification>::Params =
@@ -1442,6 +1561,22 @@ impl LspServerProcess {
                                     .ok_or_else(|| anyhow::anyhow!("Missing params"))?,
                             )?;
                         self.handle_progress_notification(params);
+                    }
+                    "language/status" => {
+                        #[derive(serde::Deserialize)]
+                        struct LanguageStatus {
+                            message: String,
+                        }
+                        let params: LanguageStatus = serde_json::from_value(
+                            request
+                                .params
+                                .ok_or_else(|| anyhow::anyhow!("Missing params"))?,
+                        )?;
+                        self.send_to_app(AppMessage::LspNotification(Box::new(
+                            LspNotification::Progress {
+                                message: params.message,
+                            },
+                        )));
                     }
 
                     _ => lsp_info!(
@@ -1517,6 +1652,32 @@ impl LspServerProcess {
         Ok(())
     }
 
+    fn send_error_reply(
+        &mut self,
+        id: Option<json_rpc_types::Id>,
+        code: i32,
+        message: &str,
+    ) -> anyhow::Result<()> {
+        #[derive(serde::Serialize)]
+        struct ResponseError<'a> {
+            code: i32,
+            message: &'a str,
+        }
+
+        #[derive(serde::Serialize)]
+        struct ResponseMessage<'a> {
+            jsonrpc: &'static str,
+            id: Option<json_rpc_types::Id>,
+            error: ResponseError<'a>,
+        }
+
+        self.send_json(&ResponseMessage {
+            jsonrpc: "2.0",
+            id,
+            error: ResponseError { code, message },
+        })
+    }
+
     /// Send JSON to the LSP server by writing to the server's stdin
     fn send_json<T: serde::Serialize>(&mut self, value: T) -> anyhow::Result<()> {
         let json = serde_json::to_string(&value)?;
@@ -1572,7 +1733,7 @@ impl LspServerProcess {
         &mut self,
         file_path: AbsolutePath,
         language_id: String,
-        version: usize,
+        version: i32,
         content: String,
     ) -> Result<(), anyhow::Error> {
         if !self.has_capability(Self::server_supports_text_document_open_close) {
@@ -1584,7 +1745,7 @@ impl LspServerProcess {
                 text_document: TextDocumentItem {
                     uri: path_buf_to_url(file_path.clone())?,
                     language_id,
-                    version: version as i32,
+                    version,
                     text: content,
                 },
             },
@@ -1616,6 +1777,18 @@ impl LspServerProcess {
             },
         )?;
         self.request_document_diagnostics(file_path)
+    }
+
+    fn text_document_did_close(&mut self, file_path: AbsolutePath) -> Result<(), anyhow::Error> {
+        if !self.has_capability(Self::server_supports_text_document_open_close) {
+            return Ok(());
+        }
+
+        self.send_notification::<lsp_notification!("textDocument/didClose")>(
+            DidCloseTextDocumentParams {
+                text_document: path_buf_to_text_document_identifier(file_path)?,
+            },
+        )
     }
 
     fn text_document_did_save(&mut self, file_path: AbsolutePath) -> Result<(), anyhow::Error> {
@@ -2182,6 +2355,9 @@ impl LspServerProcess {
                 version,
                 content,
             } => self.text_document_did_change(file_path, version, content),
+            FromEditor::TextDocumentDidClose { file_path } => {
+                self.text_document_did_close(file_path)
+            }
             FromEditor::TextDocumentDidSave { file_path } => self.text_document_did_save(file_path),
             FromEditor::TextDocumentSignatureHelp(params) => {
                 self.text_document_signature_help(params)
@@ -2319,6 +2495,64 @@ mod test_lsp_server_process {
     use std::process::Command;
     use std::sync::mpsc;
 
+    type ServerRequestProcess = (
+        LspServerProcess,
+        process::Child,
+        crossbeam_channel::Receiver<AppMessage>,
+        Sender<LspServerProcessMessage>,
+        Receiver<LspServerProcessMessage>,
+        tempfile::TempDir,
+        std::path::PathBuf,
+    );
+
+    fn process_for_server_requests() -> anyhow::Result<ServerRequestProcess> {
+        let tempdir = tempfile::tempdir()?;
+        let messages_path = tempdir.path().join("messages");
+        let output = std::fs::File::create(&messages_path)?;
+        let mut child = Command::new("sh")
+            .args(["-c", "cat"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(output)
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let stdin = child.stdin.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (app_sender, app_receiver) = crossbeam_channel::unbounded();
+        let (sender, receiver) = mpsc::channel();
+        let process = LspServerProcess {
+            language: Language::default(),
+            server_config: LspServerConfig::new(
+                "test",
+                shared::language::Command::new("test-lsp", &[]),
+            ),
+            stdin,
+            stdout: None,
+            stderr: Some(stderr),
+            server_capabilities: None,
+            current_working_directory: std::env::current_dir()?.try_into()?,
+            next_request_id: 0,
+            pending_response_requests: HashMap::new(),
+            pending_call_hierarchy_directions: HashMap::new(),
+            app_message_sender: app_sender,
+            sender: sender.clone(),
+            progress_notification_manager: ProgressNotificationManager::new(
+                "nothing".to_string(),
+                Callback::new(Arc::new(|_| {})),
+            ),
+            is_initialized: true,
+        };
+
+        Ok((
+            process,
+            child,
+            app_receiver,
+            sender,
+            receiver,
+            tempdir,
+            messages_path,
+        ))
+    }
+
     #[cfg(unix)]
     #[test]
     fn shutdown_before_initialization_kills_the_process_tree() -> anyhow::Result<()> {
@@ -2378,6 +2612,40 @@ mod test_lsp_server_process {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn process_channel_reports_exited_child() -> anyhow::Result<()> {
+        let child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let process_group = ProcessGroup(child.id());
+        let (sender, _receiver) = mpsc::channel();
+        let mut channel = LspServerProcessChannel {
+            language: Language::default(),
+            server_config: LspServerConfig::new(
+                "test",
+                shared::language::Command::new("test-lsp", &[]),
+            ),
+            sender,
+            is_initialized: false,
+            child: Some(child),
+            process_group,
+            _workspace_data_lease: None,
+        };
+
+        for _ in 0..100 {
+            if !channel.is_running() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        anyhow::bail!("child process did not exit")
+    }
+
     #[test]
     fn initialized_shutdown_sends_shutdown_and_exit() -> anyhow::Result<()> {
         let tempdir = tempfile::tempdir()?;
@@ -2433,6 +2701,94 @@ mod test_lsp_server_process {
     }
 
     #[test]
+    fn show_message_request_is_displayed_and_cancelled() -> anyhow::Result<()> {
+        let (mut process, mut child, app_receiver, _sender, _receiver, _tempdir, messages_path) =
+            process_for_server_requests()?;
+
+        process.handle_reply(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "window/showMessageRequest",
+            "params": {
+                "type": 2,
+                "message": "Update the Java project configuration?",
+                "actions": [{ "title": "Update" }]
+            }
+        }))?;
+
+        let AppMessage::LspNotification(notification) = app_receiver.recv()? else {
+            panic!("expected an LSP notification");
+        };
+        assert!(matches!(
+            *notification,
+            LspNotification::ShowMessage {
+                typ: MessageType::WARNING,
+                ..
+            }
+        ));
+        drop(process);
+        child.wait()?;
+        let messages = std::fs::read_to_string(messages_path)?;
+        assert!(messages.contains("\"id\":7"));
+        assert!(messages.contains("\"result\":null"));
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_capability_registration_is_rejected() -> anyhow::Result<()> {
+        let (mut process, mut child, _app_receiver, _sender, _receiver, _tempdir, messages_path) =
+            process_for_server_requests()?;
+
+        process.handle_reply(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "client/registerCapability",
+            "params": { "registrations": [] }
+        }))?;
+
+        drop(process);
+        child.wait()?;
+        let messages = std::fs::read_to_string(messages_path)?;
+        assert!(messages.contains("\"id\":9"));
+        assert!(messages.contains("\"code\":-32601"));
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_edit_reports_application_failure() -> anyhow::Result<()> {
+        let (mut process, mut child, app_receiver, sender, receiver, _tempdir, messages_path) =
+            process_for_server_requests()?;
+
+        process.handle_reply(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "workspace/applyEdit",
+            "params": { "edit": { "changes": {} } }
+        }))?;
+        let AppMessage::LspNotification(notification) = app_receiver.recv()? else {
+            panic!("expected an LSP notification");
+        };
+        let LspNotification::WorkspaceEdit {
+            respond: Some(respond),
+            ..
+        } = *notification
+        else {
+            panic!("expected a workspace edit request");
+        };
+        respond.call(Err("edit failed".to_string()));
+        sender.send(LspServerProcessMessage::Exit)?;
+        process.process_messages(receiver);
+        drop(process);
+        child.wait()?;
+
+        let messages = std::fs::read_to_string(messages_path)?;
+        assert!(messages.contains("\"id\":11"));
+        assert!(messages.contains("\"applied\":false"));
+        assert!(messages.contains("edit failed"));
+        Ok(())
+    }
+
+    #[test]
     fn text_document_lifecycle_notifications_require_server_sync_capabilities() {
         let mut capabilities = ServerCapabilities::default();
 
@@ -2475,6 +2831,32 @@ mod test_lsp_server_process {
         assert!(LspServerProcess::server_supports_text_document_save(
             &capabilities
         ));
+    }
+
+    #[test]
+    fn text_document_did_close_is_serialized_when_supported() -> anyhow::Result<()> {
+        let (mut process, mut child, _app_receiver, _sender, _receiver, _tempdir, messages_path) =
+            process_for_server_requests()?;
+        let file_path: AbsolutePath = std::env::current_dir()?.join("Main.java").try_into()?;
+
+        process.text_document_did_close(file_path.clone())?;
+        process.server_capabilities = Some(ServerCapabilities {
+            text_document_sync: Some(TextDocumentSyncCapability::Options(
+                TextDocumentSyncOptions {
+                    open_close: Some(true),
+                    ..TextDocumentSyncOptions::default()
+                },
+            )),
+            ..ServerCapabilities::default()
+        });
+        process.text_document_did_close(file_path.clone())?;
+        drop(process);
+        child.wait()?;
+
+        let messages = std::fs::read_to_string(messages_path)?;
+        assert_eq!(messages.matches("textDocument/didClose").count(), 1);
+        assert!(messages.contains(&file_path.display_absolute()));
+        Ok(())
     }
 
     #[test]

@@ -67,6 +67,7 @@ pub struct Buffer {
     cached_jj_conflicts: RefCell<Option<CachedJjConflicts>>,
     cached_injected_syntax_trees: RefCell<Option<CachedInjectedSyntaxTrees>>,
     content_revision: usize,
+    lsp_document_version: i32,
 
     /// Timestamp of the file when we last read/wrote it
     last_synced_time: Option<SystemTime>,
@@ -195,6 +196,7 @@ impl Buffer {
             cached_jj_conflicts: RefCell::new(None),
             cached_injected_syntax_trees: RefCell::new(None),
             content_revision: 0,
+            lsp_document_version: 1,
             last_synced_time: None,
             #[cfg(test)]
             tree_reparsed_count: 0,
@@ -256,6 +258,15 @@ impl Buffer {
 
     pub fn path(&self) -> Option<AbsolutePath> {
         self.path.clone()
+    }
+
+    pub fn next_lsp_document_version(&mut self) -> i32 {
+        self.lsp_document_version += 1;
+        self.lsp_document_version
+    }
+
+    pub fn lsp_document_version(&self) -> i32 {
+        self.lsp_document_version
     }
 
     #[cfg(test)]

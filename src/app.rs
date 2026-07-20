@@ -42,7 +42,9 @@ use crate::{
         completion::CompletionItem,
         goto_definition_response::GotoDefinitionResponse,
         manager::LspManager,
-        process::{CallHierarchyDirection, FromEditor, LspNotification, ResponseContext},
+        process::{
+            CallHierarchyDirection, FromEditor, LspNotification, OpenDocument, ResponseContext,
+        },
         symbols::Symbols,
         workspace_edit::WorkspaceEdit,
     },
@@ -1012,6 +1014,7 @@ impl<T: Frontend> App<T> {
                 language,
                 component_id,
                 batch_id,
+                version,
             } => {
                 if let Some(language) = language {
                     self.request_syntax_highlight(
@@ -1028,7 +1031,7 @@ impl<T: Frontend> App<T> {
                         FromEditor::TextDocumentDidChange {
                             content,
                             file_path: path,
-                            version: 2,
+                            version,
                         },
                     )?;
                 }
@@ -1379,6 +1382,14 @@ impl<T: Frontend> App<T> {
 
     fn close_current_window(&mut self) -> anyhow::Result<()> {
         if let Some(removed_path) = self.layout.close_current_window(&self.context) {
+            if let Err(error) = self.lsp_manager().send_message(
+                removed_path.clone(),
+                FromEditor::TextDocumentDidClose {
+                    file_path: removed_path.clone(),
+                },
+            ) {
+                log::error!("Failed to notify LSP servers that {removed_path:?} closed: {error:?}");
+            }
             self.send_file_watcher_input(FileWatcherInput::SyncOpenedPaths(
                 self.layout.get_opened_files(),
             ));
@@ -1701,6 +1712,20 @@ impl<T: Frontend> App<T> {
 
         // Check if the file is opened before so that we won't notify the LSP twice
         if let Some(matching_editor) = self.layout.open_file(path, focus) {
+            if self.enable_lsp {
+                let document = {
+                    let editor = matching_editor.borrow();
+                    let buffer = editor.editor().buffer();
+                    OpenDocument {
+                        path: path.clone(),
+                        version: buffer.lsp_document_version(),
+                        content: buffer.content(),
+                    }
+                };
+                if let Err(error) = self.lsp_manager().ensure_file_server(document) {
+                    log::error!("Failed to ensure LSP for {path:?}: {error:?}");
+                }
+            }
             return Ok(matching_editor);
         }
 
@@ -1709,6 +1734,7 @@ impl<T: Frontend> App<T> {
 
         let language = buffer.language();
         let content = buffer.content();
+        let lsp_document_version = buffer.lsp_document_version();
         let batch_id = buffer.batch_id().clone();
         let buffer = Rc::new(RefCell::new(buffer));
         let editor = SuggestiveEditor::from_buffer(
@@ -1726,10 +1752,14 @@ impl<T: Frontend> App<T> {
                 .replace_and_focus_current_suggestive_editor(component.clone());
         }
         if let Some(language) = language {
-            self.request_syntax_highlight(component_id, batch_id, language, content)?;
+            self.request_syntax_highlight(component_id, batch_id, language, content.clone())?;
         }
         if self.enable_lsp {
-            if let Err(err) = self.lsp_manager().open_file(path.clone()) {
+            if let Err(err) = self.lsp_manager().open_file(OpenDocument {
+                path: path.clone(),
+                version: lsp_document_version,
+                content,
+            }) {
                 log::error!("Failed to notify/initialize LSP for {path:?} due to {err:?}");
             }
         }
@@ -1794,8 +1824,13 @@ impl<T: Frontend> App<T> {
                     .buffers()
                     .into_iter()
                     .filter_map(|buffer| {
-                        if buffer.borrow().language()? == *language {
-                            buffer.borrow().path()
+                        let buffer = buffer.borrow();
+                        if buffer.language()? == *language {
+                            Some(OpenDocument {
+                                path: buffer.path()?,
+                                version: buffer.lsp_document_version(),
+                                content: buffer.content(),
+                            })
                         } else {
                             None
                         }
@@ -1804,23 +1839,22 @@ impl<T: Frontend> App<T> {
                 let manager = self.lsp_manager();
                 let opened_documents = opened_documents
                     .into_iter()
-                    .filter(|path| manager.lsp_root_for_path(&language, path) == root)
+                    .filter(|document| manager.lsp_root_for_path(&language, &document.path) == root)
                     .collect();
                 manager.initialized(*language, server_id, root, opened_documents);
                 Ok(())
             }
             LspNotification::PublishDiagnostics { server_id, params } => {
-                self.update_diagnostics_from_source(
-                    params
-                        .uri
-                        .to_file_path()
-                        .map_err(|err| {
-                            anyhow::anyhow!("Couldn't convert URI to file path: {:?}", err)
-                        })?
-                        .try_into()?,
-                    server_id,
-                    params.diagnostics,
-                )?;
+                let path: AbsolutePath = params
+                    .uri
+                    .to_file_path()
+                    .map_err(|err| anyhow::anyhow!("Couldn't convert URI to file path: {err:?}"))?
+                    .try_into()?;
+                if path.is_file() {
+                    self.update_diagnostics_from_source(path, server_id, params.diagnostics)?;
+                } else {
+                    log::info!("Ignoring LSP diagnostics for non-file URI: {path:?}");
+                }
                 Ok(())
             }
             LspNotification::PrepareRenameResponse(response) => {
@@ -1848,8 +1882,31 @@ impl<T: Frontend> App<T> {
                 self.show_global_info(Info::new("LSP Error".to_string(), error));
                 Ok(())
             }
-            LspNotification::WorkspaceEdit(workspace_edit) => {
-                self.apply_workspace_edit(workspace_edit)
+            LspNotification::WorkspaceEdit { edit, respond } => {
+                let result = self.apply_workspace_edit(edit);
+                if let Some(respond) = respond {
+                    respond.call(
+                        result
+                            .as_ref()
+                            .map(|_| ())
+                            .map_err(|error| error.to_string()),
+                    );
+                }
+                result
+            }
+            LspNotification::ShowMessage {
+                server_id,
+                typ,
+                message,
+            } => {
+                let level = match typ {
+                    lsp_types::MessageType::ERROR => "Error",
+                    lsp_types::MessageType::WARNING => "Warning",
+                    lsp_types::MessageType::INFO => "Info",
+                    _ => "Message",
+                };
+                self.show_global_info(Info::new(format!("LSP {level}: {server_id}"), message));
+                Ok(())
             }
             LspNotification::CodeAction(code_actions) => {
                 self.handle_dispatch(Dispatch::ReceiveCodeActions(code_actions))?;
@@ -2054,6 +2111,14 @@ impl<T: Frontend> App<T> {
         // Such that it won't leave the workspace in an half-edited messed up state
         for edit in workspace_edit.edits {
             let component = self.open_file(&edit.path, BufferOwner::System, false, false)?;
+            if let Some(expected_version) = edit.version {
+                let actual_version = component.borrow().editor().buffer().lsp_document_version();
+                anyhow::ensure!(
+                    expected_version == actual_version,
+                    "LSP workspace edit for {:?} expected document version {expected_version}, but the current version is {actual_version}",
+                    edit.path
+                );
+            }
             let dispatches = component
                 .borrow_mut()
                 .editor_mut()
@@ -3980,6 +4045,7 @@ pub enum Dispatch {
         path: Option<AbsolutePath>,
         content: String,
         language: Option<Language>,
+        version: i32,
     },
     DocumentDidSave {
         path: AbsolutePath,

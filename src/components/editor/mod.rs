@@ -1672,12 +1672,14 @@ impl Editor {
     }
 
     pub fn get_document_did_change_dispatch(&mut self) -> Dispatches {
+        let version = self.buffer_mut().next_lsp_document_version();
         [Dispatch::DocumentDidChange {
             component_id: self.id(),
             batch_id: self.buffer().batch_id().clone(),
             path: self.buffer().path(),
             content: self.buffer().rope().to_string(),
             language: self.buffer().language(),
+            version,
         }]
         .into_iter()
         .collect_vec()
