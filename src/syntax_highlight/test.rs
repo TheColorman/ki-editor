@@ -76,6 +76,26 @@ fn syntax_highlight_json() -> anyhow::Result<()> {
 }
 
 #[test]
+fn syntax_highlight_java() -> anyhow::Result<()> {
+    let source_code = r#"public class Hello {
+    String message = "hello";
+}"#;
+
+    let mut highlight_configs = HighlightConfigs::new();
+    let highlighted_spans = highlight_configs.highlight(
+        crate::config::from_extension("java").unwrap(),
+        source_code,
+        &std::sync::atomic::AtomicUsize::new(0),
+    )?;
+
+    assert_substring_highlighted_as(source_code, &highlighted_spans, "class", "keyword.type");
+    assert_substring_highlighted_as(source_code, &highlighted_spans, "Hello", "type");
+    assert_substring_highlighted_as(source_code, &highlighted_spans, "\"hello\"", "string");
+
+    Ok(())
+}
+
+#[test]
 fn syntax_highlight_vue_embedded_languages() -> anyhow::Result<()> {
     let source_code = r#"<template>
   <button :class="isActive ? 'active' : 'inactive'">{{ count + 1 }}</button>

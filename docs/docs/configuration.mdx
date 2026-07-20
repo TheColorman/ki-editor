@@ -2,9 +2,9 @@
 sidebar_position: 11
 ---
 
-import { AppConfigSchemaViewerFallback } from "./SchemaViewerFallback.tsx"
-import { ScriptInputSchemaViewerFallback } from "./SchemaViewerFallback.tsx"
-import { ScriptOutputSchemaViewerFallback } from "./SchemaViewerFallback.tsx"
+import { AppConfigSchemaViewerFallback } from "./SchemaViewerFallback.tsx";
+import { ScriptInputSchemaViewerFallback } from "./SchemaViewerFallback.tsx";
+import { ScriptOutputSchemaViewerFallback } from "./SchemaViewerFallback.tsx";
 
 # Configuration
 
@@ -20,7 +20,7 @@ Note: Workspace config overrides Global config.
 
 ## Config Schema
 
-<AppConfigSchemaViewerFallback/>
+<AppConfigSchemaViewerFallback />
 
 ## WakaTime
 
@@ -42,6 +42,91 @@ Then enable it in your Ki config:
 Ki sends heartbeats when a file is focused, edited, or saved. Save heartbeats include WakaTime's `--write` flag.
 
 When Ki runs embedded inside VS Code, this native tracker is disabled to avoid duplicate activity if the VS Code WakaTime extension is installed.
+
+## Java
+
+Standalone Ki provides Java language features through [Eclipse JDT Language Server](https://github.com/eclipse-jdtls/eclipse.jdt.ls). Install `jdtls` and make sure the `jdtls` command is available on the `PATH` inherited by Ki. Current JDTLS releases require Java 21 or newer to run. If you install the official `bin/jdtls` wrapper rather than a distribution package, it also requires Python 3.9 or newer.
+
+This setup applies only to standalone Ki. When Ki is embedded in VS Code, VS Code provides the language-server integration instead.
+
+### Project Roots
+
+Ki searches upward from a Java file for Maven and Gradle project markers. Workspace markers take precedence: `settings.gradle`, `settings.gradle.kts`, `gradlew`, `gradlew.bat`, `mvnw`, `mvnw.cmd`, or a `.mvn` directory. Otherwise, Ki uses the nearest `pom.xml`, `build.gradle`, or `build.gradle.kts`; if none exists, it uses the file's directory.
+
+### JDTLS Configuration
+
+The default server command is `jdtls -data ${lsp_data_dir}`. To change the executable or send [JDTLS initialization settings](https://github.com/eclipse-jdtls/eclipse.jdt.ls/wiki/Running-the-JAVA-LS-server-from-the-command-line#initialize-request), override Java's `lsp_servers` list:
+
+```json
+{
+  "languages": {
+    "java": {
+      "lsp_servers": [
+        {
+          "id": "jdtls",
+          "command": {
+            "command": "/opt/jdtls/bin/jdtls",
+            "arguments": ["-data", "${lsp_data_dir}"]
+          },
+          "primary": true,
+          "initialization_options": {
+            "bundles": [],
+            "settings": {
+              "java": {
+                "signatureHelp": {
+                  "enabled": true
+                },
+                "configuration": {
+                  "runtimes": [
+                    {
+                      "name": "JavaSE-17",
+                      "path": "/opt/jdks/17"
+                    },
+                    {
+                      "name": "JavaSE-21",
+                      "path": "/opt/jdks/21",
+                      "default": true
+                    }
+                  ],
+                  "maven": {
+                    "userSettings": "/home/me/.m2/settings.xml"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+Replace the example paths with absolute paths for your system. The Java 21 requirement is for the JVM that starts JDTLS; `java.configuration.runtimes` tells JDTLS which JDKs project source levels may use. Overriding `lsp_servers` replaces the default list, so retain `-data` and `${lsp_data_dir}` unless you intentionally want to manage JDTLS workspace data yourself.
+
+### Cache and Troubleshooting
+
+Ki assigns JDTLS a data directory under Ki's platform-specific cache directory, grouped by server and project root. On Unix, reopening a project reuses its persistent data. Concurrent Ki processes for the same project receive separate locked slots so they do not open the same JDTLS data directory simultaneously. On Windows, each launch uses a fresh slot because Ki cannot yet guarantee termination of every process created by a JDTLS launcher.
+
+Inspect language-server output with:
+
+```shell
+ki @ log lsp
+```
+
+If JDTLS workspace data becomes corrupt, close every Ki instance using the project and remove that project's directory under Ki's cache `lsp/jdtls-*/` tree. Removing all standalone JDTLS data on a typical Linux system looks like:
+
+```shell
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/ki/lsp"/jdtls-*
+```
+
+The cache base differs on macOS, Windows, and customized XDG installations; locate the platform cache directory rather than using the Linux command unchanged. The next standalone Ki session recreates and reimports the data.
+
+Initial Java support does not include:
+
+- Debugger integration
+- Java test extension bundles
+- Virtual documents for class files
 
 ## Scripting
 

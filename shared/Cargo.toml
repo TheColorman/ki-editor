@@ -33,6 +33,7 @@ tree-sitter-gleam = "1.0.0"
 tree-sitter-go = "0.23.4"
 tree-sitter-graphql = "0.1.0"
 tree-sitter-html = "0.23.2"
+tree-sitter-java = "0.23.5"
 tree-sitter-lua = "0.2.0"
 tree-sitter-md = "0.3.2"
 tree-sitter-python = "0.23.6"
@@ -86,7 +87,6 @@ arborium-typst = "2.18.1"
 tree-sitter-gitcommit = "0.5.0"
 tree-sitter-php = "0.24.2"
 tree-sitter-gherkin = { git = "https://github.com/binhtddev/tree-sitter-gherkin", rev = "1a709ae" }
-tree-sitter-java = "0.23.5"
 
 [dev-dependencies]
 quickcheck.workspace = true

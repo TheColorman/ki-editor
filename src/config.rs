@@ -542,6 +542,7 @@ mod test_language {
         run_test_case("hello.rs", "rust")?;
         run_test_case("hello.cs", "c_sharp")?;
         run_test_case("hello.cshtml", "razor")?;
+        run_test_case("hello.java", "java")?;
         run_test_case("hello.vue", "vue")?;
         run_test_case("justfile", "just")?;
         Ok(())
@@ -561,6 +562,7 @@ mod test_language {
         run_test_case("#!/bin/bash", "bash")?;
         run_test_case("#!/usr/local/bin/bash", "bash")?;
         run_test_case("// mode: python", "python")?;
+        run_test_case("// mode: java", "java")?;
         run_test_case("-- tab_spaces: 5, mode: bash, use_tabs: false", "bash")?;
         run_test_case("-- tab_spaces: 5, mode:bash, use_tabs: false", "bash")?;
         run_test_case("-- vim: ft = bash", "bash")?;

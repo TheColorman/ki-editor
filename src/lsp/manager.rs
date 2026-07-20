@@ -24,6 +24,45 @@ fn is_package_workspace_root(path: &Path) -> bool {
     .any(|marker| path.join(marker).exists())
 }
 
+fn is_java_workspace_root(path: &Path) -> bool {
+    [
+        "settings.gradle",
+        "settings.gradle.kts",
+        "gradlew",
+        "gradlew.bat",
+        "mvnw",
+        "mvnw.cmd",
+    ]
+    .into_iter()
+    .any(|marker| path.join(marker).exists())
+        || path.join(".mvn").is_dir()
+}
+
+fn is_java_project_root(path: &Path) -> bool {
+    ["pom.xml", "build.gradle", "build.gradle.kts"]
+        .into_iter()
+        .any(|marker| path.join(marker).exists())
+}
+
+fn java_lsp_root(file_parent: &Path, boundary: &Path) -> PathBuf {
+    let stop_at_boundary = file_parent.starts_with(boundary);
+    let mut nearest_project = None;
+
+    for ancestor in file_parent.ancestors() {
+        if is_java_workspace_root(ancestor) {
+            return ancestor.to_path_buf();
+        }
+        if nearest_project.is_none() && is_java_project_root(ancestor) {
+            nearest_project = Some(ancestor.to_path_buf());
+        }
+        if stop_at_boundary && ancestor == boundary {
+            break;
+        }
+    }
+
+    nearest_project.unwrap_or_else(|| file_parent.to_path_buf())
+}
+
 fn contains_file_with_extension(path: &Path, extensions: &[&str]) -> bool {
     std::fs::read_dir(path).is_ok_and(|entries| {
         entries.filter_map(Result::ok).any(|entry| {
@@ -119,6 +158,276 @@ mod tests {
         assert_eq!(actual.as_ref(), project);
         Ok(())
     }
+
+    #[test]
+    fn java_lsp_root_falls_back_to_maven_project() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let project = tempdir.path().join("service");
+        let source = project.join("src/main/java/App.java");
+        std::fs::create_dir_all(source.parent().unwrap())?;
+        std::fs::write(project.join("pom.xml"), "")?;
+        std::fs::write(&source, "class App {}")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let language = crate::config::from_extension("java").unwrap();
+
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&language, &source.try_into()?)
+                .as_ref(),
+            project
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn java_lsp_root_falls_back_to_gradle_projects() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let language = crate::config::from_extension("java").unwrap();
+
+        for (name, marker) in [("groovy", "build.gradle"), ("kotlin", "build.gradle.kts")] {
+            let project = tempdir.path().join(name);
+            let source = project.join("src/main/java/App.java");
+            std::fs::create_dir_all(source.parent().unwrap())?;
+            std::fs::write(project.join(marker), "")?;
+            std::fs::write(&source, "class App {}")?;
+
+            assert_eq!(
+                manager
+                    .lsp_root_for_path(&language, &source.try_into()?)
+                    .as_ref(),
+                project
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn java_lsp_root_prefers_wrapper_over_child_project() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let project = tempdir.path().join("services/app");
+        let source = project.join("src/App.java");
+        std::fs::create_dir_all(source.parent().unwrap())?;
+        std::fs::write(tempdir.path().join("gradlew"), "")?;
+        std::fs::write(project.join("pom.xml"), "")?;
+        std::fs::write(&source, "class App {}")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let language = crate::config::from_extension("java").unwrap();
+
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&language, &source.try_into()?)
+                .as_ref(),
+            tempdir.path()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn java_lsp_root_prefers_nearest_nested_settings() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let nested = tempdir.path().join("platform");
+        let source = nested.join("app/src/App.java");
+        std::fs::create_dir_all(source.parent().unwrap())?;
+        std::fs::write(tempdir.path().join("settings.gradle"), "")?;
+        std::fs::write(nested.join("settings.gradle.kts"), "")?;
+        std::fs::write(&source, "class App {}")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let language = crate::config::from_extension("java").unwrap();
+
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&language, &source.try_into()?)
+                .as_ref(),
+            nested
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn java_lsp_root_recognizes_all_workspace_markers() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let language = crate::config::from_extension("java").unwrap();
+
+        for (index, marker) in [
+            "settings.gradle",
+            "settings.gradle.kts",
+            "gradlew",
+            "gradlew.bat",
+            "mvnw",
+            "mvnw.cmd",
+            ".mvn",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let project = tempdir.path().join(format!("project-{index}"));
+            let source = project.join("src/App.java");
+            std::fs::create_dir_all(source.parent().unwrap())?;
+            if marker == ".mvn" {
+                std::fs::create_dir(project.join(marker))?;
+            } else {
+                std::fs::write(project.join(marker), "")?;
+            }
+            std::fs::write(&source, "class App {}")?;
+
+            assert_eq!(
+                manager
+                    .lsp_root_for_path(&language, &source.try_into()?)
+                    .as_ref(),
+                project
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn java_lsp_root_ignores_node_package_markers() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let source = tempdir.path().join("web/src/App.java");
+        std::fs::create_dir_all(source.parent().unwrap())?;
+        std::fs::write(tempdir.path().join("pnpm-workspace.yaml"), "packages: []")?;
+        std::fs::write(source.parent().unwrap().join("package.json"), "{}")?;
+        std::fs::write(&source, "class App {}")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let language = crate::config::from_extension("java").unwrap();
+
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&language, &source.as_path().try_into()?)
+                .as_ref(),
+            source.parent().unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn java_lsp_root_for_standalone_file_is_file_parent() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let source = tempdir.path().join("scratch/deep/App.java");
+        std::fs::create_dir_all(source.parent().unwrap())?;
+        std::fs::write(&source, "class App {}")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let language = crate::config::from_extension("java").unwrap();
+
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&language, &source.as_path().try_into()?)
+                .as_ref(),
+            source.parent().unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn java_lsp_root_does_not_search_above_cwd() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let cwd = tempdir.path().join("workspace");
+        let source = cwd.join("scratch/App.java");
+        std::fs::create_dir_all(source.parent().unwrap())?;
+        std::fs::write(tempdir.path().join("settings.gradle"), "")?;
+        std::fs::write(&source, "class App {}")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, cwd.try_into()?);
+        let language = crate::config::from_extension("java").unwrap();
+
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&language, &source.as_path().try_into()?)
+                .as_ref(),
+            source.parent().unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn java_lsp_root_outside_cwd_searches_file_ancestors() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let cwd = tempdir.path().join("cwd");
+        let project = tempdir.path().join("outside/service");
+        let source = project.join("src/App.java");
+        std::fs::create_dir(&cwd)?;
+        std::fs::create_dir_all(source.parent().unwrap())?;
+        std::fs::write(project.join("pom.xml"), "")?;
+        std::fs::write(&source, "class App {}")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, cwd.try_into()?);
+        let language = crate::config::from_extension("java").unwrap();
+
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&language, &source.try_into()?)
+                .as_ref(),
+            project
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn java_lsp_root_outside_cwd_standalone_falls_back_to_file_parent() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let cwd = tempdir.path().join("cwd");
+        let source = tempdir.path().join("outside/scratch/App.java");
+        std::fs::create_dir(&cwd)?;
+        std::fs::create_dir_all(source.parent().unwrap())?;
+        std::fs::write(&source, "class App {}")?;
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, cwd.try_into()?);
+        let language = crate::config::from_extension("java").unwrap();
+
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&language, &source.as_path().try_into()?)
+                .as_ref(),
+            source.parent().unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn java_lsp_root_keeps_projects_distinct() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, root);
+        let language = crate::config::from_extension("java").unwrap();
+        let mut roots = Vec::new();
+
+        for name in ["api", "worker"] {
+            let project = tempdir.path().join(name);
+            let source = project.join("src/App.java");
+            std::fs::create_dir_all(source.parent().unwrap())?;
+            std::fs::write(project.join("pom.xml"), "")?;
+            std::fs::write(&source, "class App {}")?;
+            roots.push(manager.lsp_root_for_path(&language, &source.try_into()?));
+        }
+
+        assert_ne!(roots[0], roots[1]);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -184,6 +493,14 @@ impl LspManager {
     ) -> AbsolutePath {
         let file_parent = path.as_ref().parent().unwrap_or(path.as_ref());
         let boundary = self.current_working_directory.as_ref();
+        let is_java = language.id().is_some_and(|id| id.to_string() == "java");
+        if is_java {
+            let root = java_lsp_root(file_parent, boundary);
+            let root = root.canonicalize().unwrap_or(root);
+            return root
+                .try_into()
+                .expect("Java root derived from an absolute file path must be absolute");
+        }
         let mut nearest_package_root = None::<PathBuf>;
         let mut nearest_csharp_project = None::<PathBuf>;
         let is_csharp = language.tree_sitter_grammar_id().as_deref() == Some("c_sharp");
@@ -468,7 +785,11 @@ impl LspManager {
             channel.wait_for_exit_until(deadline);
         }
 
-        self.open_file(path.clone())
+        self.ensure_file_server(OpenDocument {
+            path: path.clone(),
+            version: 0,
+            content: String::new(),
+        })
     }
 
     #[cfg(test)]

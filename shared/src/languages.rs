@@ -674,13 +674,25 @@ fn haskell() -> Language {
 }
 
 fn java() -> Language {
+    let mut jdtls = LspServerConfig::new(
+        "jdtls",
+        Command::new("jdtls", &["-data", "${lsp_data_dir}"]),
+    );
+    jdtls.initialization_options = Some(json!({
+        "bundles": [],
+        "settings": {
+            "java": {
+                "signatureHelp": {
+                    "enabled": true
+                }
+            }
+        }
+    }));
+
     Language {
         extensions: to_vec(&["java"]),
-        lsp_command: Some(LspCommand {
-            command: Command::new("jdtls", &[]),
-            ..LspCommand::default()
-        }),
         lsp_language_id: Some(LanguageId::new("java")),
+        lsp_servers: vec![jdtls],
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "java".to_string(),
             kind: GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Java),
@@ -1460,6 +1472,36 @@ mod test {
             razor.injection_query().unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn java_query_compiles() {
+        let java = super::languages().remove("java").unwrap();
+        Query::new(
+            &java.tree_sitter_language().unwrap(),
+            &java.highlight_query().unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn java_uses_jdtls_with_persistent_workspace_data() {
+        let java = super::languages().remove("java").unwrap();
+        let servers = java.lsp_server_configs();
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id(), "jdtls");
+        assert!(servers[0].primary());
+        assert_eq!(servers[0].process_command().command(), "jdtls");
+        assert_eq!(
+            servers[0].process_command().arguments(),
+            ["-data", "${lsp_data_dir}"]
+        );
+        assert_eq!(
+            servers[0].initialization_options().unwrap()["settings"]["java"]["signatureHelp"]
+                ["enabled"],
+            true
+        );
     }
 
     #[test]
