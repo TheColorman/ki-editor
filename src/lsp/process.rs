@@ -62,17 +62,27 @@ fn diagnostics_from_document_diagnostic(
 fn workspace_configuration_response(
     params: ConfigurationParams,
     root: &AbsolutePath,
+    initialization_options: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     serde_json::Value::Array(
         params
             .items
             .into_iter()
-            .map(|item| configuration_value(item.section.as_deref(), root))
+            .map(|item| configuration_value(item.section.as_deref(), root, initialization_options))
             .collect(),
     )
 }
 
-fn configuration_value(section: Option<&str>, root: &AbsolutePath) -> serde_json::Value {
+fn configuration_value(
+    section: Option<&str>,
+    root: &AbsolutePath,
+    initialization_options: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(value) = configured_settings_value(section, initialization_options) {
+        return resolve_initialization_options(Some(value), root)
+            .unwrap_or(serde_json::Value::Null);
+    }
+
     let value = match section {
         Some("") => serde_json::json!({
             "typescript.tsdk": "${workspace}/node_modules/typescript/lib",
@@ -131,6 +141,21 @@ fn configuration_value(section: Option<&str>, root: &AbsolutePath) -> serde_json
     };
 
     resolve_initialization_options(Some(value), root).unwrap_or(serde_json::Value::Null)
+}
+
+fn configured_settings_value(
+    section: Option<&str>,
+    initialization_options: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let settings = initialization_options?.get("settings")?;
+    let Some(section) = section.filter(|section| !section.is_empty()) else {
+        return Some(settings.clone());
+    };
+
+    section
+        .split('.')
+        .try_fold(settings, |value, key| value.get(key))
+        .cloned()
 }
 
 fn hint_for_lsp_error(message: &str) -> Option<&'static str> {
@@ -347,6 +372,7 @@ pub struct LspServerProcessChannel {
     is_initialized: bool,
     child: Option<process::Child>,
     process_group: ProcessGroup,
+    _workspace_data_lease: Option<super::workspace_data::WorkspaceDataLease>,
 }
 
 impl Drop for LspServerProcessChannel {
@@ -468,7 +494,13 @@ impl LspServerProcess {
         app_message_sender: crossbeam_channel::Sender<AppMessage>,
         current_working_directory: AbsolutePath,
     ) -> anyhow::Result<Option<LspServerProcessChannel>> {
-        let process_command = server_config.process_command();
+        let super::server_config::ResolvedProcessCommand {
+            command: process_command,
+            workspace_data_lease,
+        } = super::server_config::resolve_process_command(
+            &server_config,
+            &current_working_directory,
+        )?;
 
         let mut process = process_command
             .spawn_in_directory_in_new_process_group(current_working_directory.as_ref())?;
@@ -535,6 +567,7 @@ impl LspServerProcess {
             is_initialized: false,
             child: Some(process),
             process_group,
+            _workspace_data_lease: workspace_data_lease,
         }))
     }
 
@@ -1370,11 +1403,13 @@ impl LspServerProcess {
                                 .params
                                 .ok_or_else(|| anyhow::anyhow!("Missing params"))?,
                         )?;
+                        let initialization_options = self.server_config.initialization_options();
                         self.send_reply(
                             request.id,
                             workspace_configuration_response(
                                 params,
                                 &self.current_working_directory,
+                                initialization_options.as_ref(),
                             ),
                         )?;
                     }
@@ -2308,6 +2343,7 @@ mod test_lsp_server_process {
             is_initialized: false,
             child: Some(child),
             process_group,
+            _workspace_data_lease: None,
         };
 
         let child_pid = (0..100)
@@ -2497,6 +2533,7 @@ mod test_lsp_server_process {
                 }],
             },
             &root,
+            None,
         );
         let configs = response.as_array().unwrap();
         assert!(configs[0]["validate"]
@@ -2516,6 +2553,7 @@ mod test_lsp_server_process {
                 }],
             },
             &root,
+            None,
         );
         let configs = response.as_array().unwrap();
         assert_eq!(
@@ -2529,6 +2567,50 @@ mod test_lsp_server_process {
             configs[0]["vtsls"]["tsserver"]["globalPlugins"][0]["name"],
             "@vue/typescript-plugin"
         );
+    }
+
+    #[test]
+    fn workspace_configuration_uses_java_initialization_settings() {
+        let root: AbsolutePath = "/tmp/java-project".try_into().unwrap();
+        let initialization_options = serde_json::json!({
+            "settings": {
+                "java": {
+                    "signatureHelp": { "enabled": true },
+                    "configuration": {
+                        "runtimes": [{ "path": "${workspace}/jdk", "name": "JavaSE-21" }]
+                    }
+                }
+            }
+        });
+        let response = workspace_configuration_response(
+            ConfigurationParams {
+                items: vec![
+                    ConfigurationItem {
+                        scope_uri: None,
+                        section: Some("java".to_string()),
+                    },
+                    ConfigurationItem {
+                        scope_uri: None,
+                        section: Some("java.signatureHelp.enabled".to_string()),
+                    },
+                    ConfigurationItem {
+                        scope_uri: None,
+                        section: Some("unknown".to_string()),
+                    },
+                ],
+            },
+            &root,
+            Some(&initialization_options),
+        );
+        let configs = response.as_array().unwrap();
+
+        assert_eq!(configs[0]["signatureHelp"]["enabled"], true);
+        assert_eq!(
+            configs[0]["configuration"]["runtimes"][0]["path"],
+            "/tmp/java-project/jdk"
+        );
+        assert_eq!(configs[1], true);
+        assert_eq!(configs[2], serde_json::Value::Null);
     }
 
     #[test]

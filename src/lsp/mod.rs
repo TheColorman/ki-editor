@@ -12,4 +12,5 @@ mod progress_notification_manager;
 mod server_config;
 pub mod signature_help;
 pub mod symbols;
+mod workspace_data;
 pub mod workspace_edit;

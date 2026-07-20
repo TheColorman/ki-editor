@@ -60,6 +60,15 @@ impl ProcessCommand {
         which::which(&self.command).is_ok()
     }
 
+    pub fn arguments(&self) -> &[String] {
+        &self.args
+    }
+
+    pub fn environment(&self) -> &HashMap<String, String> {
+        &self.environment
+    }
+
+
     pub fn spawn(&self) -> anyhow::Result<std::process::Child> {
         self.spawn_inner(None, false)
     }
