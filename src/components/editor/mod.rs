@@ -397,6 +397,7 @@ impl Component for Editor {
             }
             RevertHunk(diff_mode) => return self.revert_hunk(context, diff_mode),
             AcceptJjConflictSection => return self.accept_jj_conflict_section(context),
+            GoToJjConflict(movement) => return self.go_to_jj_conflict(movement, context),
             GitBlame => return self.git_blame(context),
             ReloadFile { force } => return self.reload(context, force),
             MergeContent {
@@ -4573,6 +4574,39 @@ impl Editor {
         self.apply_edit_transaction(edit_transaction, context)
     }
 
+    fn go_to_jj_conflict(
+        &mut self,
+        movement: Movement,
+        context: &Context,
+    ) -> anyhow::Result<Dispatches> {
+        let buffer = self.buffer();
+        let cursor_line = buffer.char_to_line(self.get_cursor_char_index())?;
+        let conflicts = buffer.jj_conflicts();
+        let current_conflict_index = conflicts
+            .iter()
+            .position(|conflict| conflict.line_range.contains(&cursor_line));
+        let target = match (movement, current_conflict_index) {
+            (Movement::Previous, Some(index)) => {
+                index.checked_sub(1).and_then(|index| conflicts.get(index))
+            }
+            (Movement::Next, Some(index)) => conflicts.get(index + 1),
+            (Movement::Previous, None) => conflicts
+                .iter()
+                .rev()
+                .find(|conflict| conflict.line_range.end <= cursor_line),
+            (Movement::Next, None) => conflicts
+                .iter()
+                .find(|conflict| conflict.line_range.start > cursor_line),
+            _ => None,
+        };
+        let Some(target_line) = target.map(|conflict| conflict.line_range.start) else {
+            return Ok(Dispatches::default());
+        };
+        drop(buffer);
+
+        self.select_line_at(target_line, context)
+    }
+
     fn git_blame(&self, context: &Context) -> Result<Dispatches, anyhow::Error> {
         let Some(file_path) = self.buffer().path() else {
             return Ok(Dispatches::default());
@@ -5274,6 +5308,7 @@ pub enum DispatchEditor {
     RepeatSearch(Scope, IfCurrentNotFound, Option<PriorChange>),
     RevertHunk(DiffMode),
     AcceptJjConflictSection,
+    GoToJjConflict(Movement),
     GitBlame,
     ReloadFile {
         force: bool,

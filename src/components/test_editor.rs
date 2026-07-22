@@ -192,6 +192,51 @@ fn space_h_accepts_jj_conflict_section() -> anyhow::Result<()> {
 }
 
 #[test]
+fn space_l_j_and_l_navigate_jj_conflicts() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent(
+                [
+                    "before",
+                    "<<<<<<< conflict 1 of 2",
+                    "+++++++ side-a",
+                    "first",
+                    ">>>>>>> conflict 1 of 2 ends",
+                    "between",
+                    "<<<<<<< conflict 2 of 2",
+                    "+++++++ side-b",
+                    "second",
+                    ">>>>>>> conflict 2 of 2 ends",
+                    "after",
+                ]
+                .join("\n"),
+            )),
+            Editor(MatchLiteral("before".to_string())),
+            App(HandleKeyEvents(keys!("space l l").to_vec())),
+            Expect(CurrentSelectedTexts(&["<<<<<<< conflict 1 of 2\n"])),
+            App(HandleKeyEvents(keys!("space l l").to_vec())),
+            Expect(CurrentSelectedTexts(&["<<<<<<< conflict 2 of 2\n"])),
+            App(HandleKeyEvents(keys!("space l l").to_vec())),
+            Expect(CurrentSelectedTexts(&["<<<<<<< conflict 2 of 2\n"])),
+            App(HandleKeyEvents(keys!("space l j").to_vec())),
+            Expect(CurrentSelectedTexts(&["<<<<<<< conflict 1 of 2\n"])),
+            App(HandleKeyEvents(keys!("space l j").to_vec())),
+            Expect(CurrentSelectedTexts(&["<<<<<<< conflict 1 of 2\n"])),
+            Editor(SetContent("no conflicts".to_string())),
+            Editor(MatchLiteral("conflicts".to_string())),
+            App(HandleKeyEvents(keys!("space l j").to_vec())),
+            App(HandleKeyEvents(keys!("space l l").to_vec())),
+            Expect(CurrentSelectedTexts(&["conflicts"])),
+        ])
+    })
+}
+
+#[test]
 /// Kill means delete until the next selection
 fn delete_should_kill_if_possible_1() -> anyhow::Result<()> {
     execute_test(|s| {
