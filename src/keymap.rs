@@ -565,6 +565,16 @@ pub fn space_context_keymap_legend_config(editor: &Editor) -> KeymapLegendConfig
                 Dispatch::ToEditor(DispatchEditor::AcceptJjConflictSection),
             ),
             Keybinding::new_undocumented(
+                key!("j"),
+                "Previous JJ Conflict",
+                Dispatch::ToEditor(DispatchEditor::GoToJjConflict(Movement::Previous)),
+            ),
+            Keybinding::new_undocumented(
+                key!("l"),
+                "Next JJ Conflict",
+                Dispatch::ToEditor(DispatchEditor::GoToJjConflict(Movement::Next)),
+            ),
+            Keybinding::new_undocumented(
                 key!("b"),
                 "Git Blame",
                 Dispatch::ToEditor(DispatchEditor::GitBlame),
