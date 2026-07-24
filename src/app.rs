@@ -90,6 +90,9 @@ pub struct App<T: Frontend> {
 
     sender: crossbeam_channel::Sender<AppMessage>,
 
+    /// Used for control messages that must not wait behind background work.
+    priority_sender: crossbeam_channel::Sender<AppMessage>,
+
     /// Used for receiving message from various sources:
     /// - Notifications from language server
     receiver: crossbeam_channel::Receiver<AppMessage>,
@@ -176,8 +179,7 @@ impl<T: Frontend> App<T> {
         use crate::syntax_highlight;
 
         let (sender, receiver) = crossbeam_channel::unbounded();
-        // For testing, it doesn't really matter what we do here
-        let (_, priority_receiver) = crossbeam_channel::unbounded();
+        let (priority_sender, priority_receiver) = crossbeam_channel::unbounded();
         let syntax_highlight_request_sender = if options.enable_syntax_highlighting {
             Some(syntax_highlight::start_thread(sender.clone()))
         } else {
@@ -188,6 +190,7 @@ impl<T: Frontend> App<T> {
             working_directory,
             sender,
             receiver,
+            priority_sender,
             priority_receiver,
             syntax_highlight_request_sender,
             status_lines,
@@ -205,6 +208,7 @@ impl<T: Frontend> App<T> {
         working_directory: AbsolutePath,
         sender: crossbeam_channel::Sender<AppMessage>,
         receiver: crossbeam_channel::Receiver<AppMessage>,
+        priority_sender: crossbeam_channel::Sender<AppMessage>,
         priority_receiver: crossbeam_channel::Receiver<AppMessage>,
         syntax_highlight_request_sender: Option<Sender<SyntaxHighlightRequest>>,
         status_lines: Vec<StatusLine>,
@@ -230,6 +234,7 @@ impl<T: Frontend> App<T> {
                 persistence,
             ),
             receiver,
+            priority_sender,
             priority_receiver,
             lsp_manager: [(
                 working_directory.clone().into_path_buf(),
@@ -338,7 +343,11 @@ impl<T: Frontend> App<T> {
                 false
             });
 
-            if should_quit || self.should_quit() {
+            if should_quit {
+                return Ok(());
+            }
+
+            if self.should_quit() {
                 break;
             }
 
@@ -403,7 +412,9 @@ impl<T: Frontend> App<T> {
     pub fn quit(&mut self) -> anyhow::Result<()> {
         self.prepare_to_suspend_or_quit()?;
 
-        self.lsp_manager().shutdown();
+        for manager in self.lsp_manager.values_mut() {
+            manager.shutdown();
+        }
 
         Ok(())
     }
@@ -2254,7 +2265,7 @@ impl<T: Frontend> App<T> {
     }
 
     pub fn quit_all(&self) -> anyhow::Result<()> {
-        Ok(self.sender.send(AppMessage::Quit)?)
+        Ok(self.priority_sender.send(AppMessage::Quit)?)
     }
 
     pub fn safe_quit(&self) -> anyhow::Result<()> {
@@ -2269,7 +2280,7 @@ impl<T: Frontend> App<T> {
                     .unwrap_or(path.display_absolute()))
                 .collect::<Vec<_>>()
         );
-        Ok(self.sender.send(AppMessage::Quit)?)
+        Ok(self.priority_sender.send(AppMessage::Quit)?)
     }
 
     fn save_all(&mut self) -> anyhow::Result<()> {
@@ -4502,5 +4513,41 @@ impl DispatchParser {
                 )))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::{mock::MockFrontend, NullWriter};
+
+    #[test]
+    fn quit_bypasses_queued_background_messages() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let working_directory: AbsolutePath = tempdir.path().try_into()?;
+        let app = App::new(
+            Rc::new(Mutex::new(MockFrontend::new(Box::new(NullWriter)))),
+            working_directory,
+            Vec::new(),
+            RunTestOptions {
+                enable_lsp: false,
+                enable_syntax_highlighting: false,
+                enable_file_watcher: false,
+            },
+        )?;
+        app.sender.send(AppMessage::GlobalSearchFinished)?;
+
+        app.quit_all()?;
+
+        let message = crossbeam_channel::select_biased! {
+            recv(app.priority_receiver) -> message => message?,
+            recv(app.receiver) -> message => message?,
+        };
+        assert!(matches!(message, AppMessage::Quit));
+        assert!(matches!(
+            app.receiver.try_recv(),
+            Ok(AppMessage::GlobalSearchFinished)
+        ));
+        Ok(())
     }
 }
