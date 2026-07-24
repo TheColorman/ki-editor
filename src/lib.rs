@@ -249,6 +249,7 @@ pub fn run(config: RunConfig) -> anyhow::Result<()> {
         config.working_directory.unwrap_or(".".try_into()?),
         sender,
         receiver,
+        priority_sender.clone(),
         priority_receiver,
         Some(syntax_highlighter_sender),
         AppConfig::singleton().status_lines(),
