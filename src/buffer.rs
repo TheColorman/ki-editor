@@ -44,6 +44,19 @@ pub enum BufferOwner {
     System,
 }
 
+pub(crate) struct SaveResult {
+    pub dispatches: Dispatches,
+    pub outcome: SaveOutcome,
+    pub content_changed: bool,
+}
+
+pub(crate) enum SaveOutcome {
+    Saved(AbsolutePath),
+    Conflict,
+    Unchanged,
+    Pathless,
+}
+
 #[derive(Clone)]
 pub struct Buffer {
     rope: Rope,
@@ -897,34 +910,51 @@ impl Buffer {
         }
     }
 
-    pub fn save_without_formatting(
+    pub(crate) fn save_without_formatting(
         &mut self,
         context: &Context,
         force: bool,
-    ) -> anyhow::Result<(Dispatches, Option<AbsolutePath>)> {
+    ) -> anyhow::Result<SaveResult> {
         if !force && !self.dirty(context) {
-            return Ok((Dispatches::default(), self.path()));
+            return Ok(SaveResult {
+                dispatches: Dispatches::default(),
+                outcome: if self.path.is_some() {
+                    SaveOutcome::Unchanged
+                } else {
+                    SaveOutcome::Pathless
+                },
+                content_changed: false,
+            });
         }
 
         if let Some(path) = &self.path {
             if let Ok(Some(dispatches)) = self.check_conflict(context, force, path) {
-                return Ok((dispatches, Some(path.clone())));
+                return Ok(SaveResult {
+                    dispatches,
+                    outcome: SaveOutcome::Conflict,
+                    content_changed: false,
+                });
             }
 
             path.write(&self.editor_config.format_content_for_save(&self.content()))?;
 
             self.last_synced_time = path.last_modified_time().ok();
 
-            Ok((
-                Dispatches::one(Dispatch::SetFileDirtyStatus {
+            Ok(SaveResult {
+                dispatches: Dispatches::one(Dispatch::SetFileDirtyStatus {
                     path: self.path.clone(),
                     dirty_status: false,
                 }),
-                Some(path.clone()),
-            ))
+                outcome: SaveOutcome::Saved(path.clone()),
+                content_changed: false,
+            })
         } else {
             log::info!("Buffer has no path");
-            Ok((Dispatches::default(), None))
+            Ok(SaveResult {
+                dispatches: Dispatches::default(),
+                outcome: SaveOutcome::Pathless,
+                content_changed: false,
+            })
         }
     }
 
@@ -955,23 +985,26 @@ impl Buffer {
         })
     }
 
-    pub fn save(
+    pub(crate) fn save(
         &mut self,
         context: &Context,
         current_selection_set: SelectionSet,
         force: bool,
         last_visible_line: usize,
-    ) -> anyhow::Result<(Dispatches, Option<AbsolutePath>)> {
+    ) -> anyhow::Result<SaveResult> {
         let extra_dispatches = if force || self.dirty(context) {
             match self.get_formatted_content() {
                 Some(Ok(formatted_content)) => {
+                    let content_changed = formatted_content != self.content();
                     let dispatches = self.update_content(
                         &formatted_content,
                         current_selection_set,
                         last_visible_line,
                     )?;
-                    let (other_dispatches, path) = self.save_without_formatting(context, force)?;
-                    return Ok((dispatches.chain(other_dispatches), path));
+                    let mut result = self.save_without_formatting(context, force)?;
+                    result.dispatches = dispatches.chain(result.dispatches);
+                    result.content_changed = content_changed;
+                    return Ok(result);
                 }
                 Some(Err(error)) => match error.downcast_ref::<SpawnCommandError>() {
                     // Specially handle command not found error
@@ -990,7 +1023,10 @@ impl Buffer {
         };
 
         self.save_without_formatting(context, force)
-            .map(|(dispatches, path)| (dispatches.chain(extra_dispatches), path))
+            .map(|mut result| {
+                result.dispatches = result.dispatches.chain(extra_dispatches);
+                result
+            })
     }
 
     pub fn update_content(

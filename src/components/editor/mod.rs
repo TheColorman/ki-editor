@@ -2935,40 +2935,35 @@ impl Editor {
     }
 
     pub fn save_without_formatting(&mut self, context: &Context) -> anyhow::Result<Dispatches> {
-        let (dispatches, path) = if context.is_running_as_embedded() {
-            (Dispatches::default(), self.path())
+        let result = if context.is_running_as_embedded() {
+            crate::buffer::SaveResult {
+                dispatches: Dispatches::default(),
+                outcome: self
+                    .path()
+                    .map(crate::buffer::SaveOutcome::Saved)
+                    .unwrap_or(crate::buffer::SaveOutcome::Pathless),
+                content_changed: false,
+            }
         } else {
             self.buffer
                 .borrow_mut()
                 .save_without_formatting(context, false)?
         };
-
-        let Some(path) = path else {
-            return Ok(Dispatches::one(Dispatch::OpenSaveAsPrompt));
-        };
-
-        self.clamp(context)?;
-        self.cursor_keep_primary_only();
-        self.enter_normal_mode(context)?;
-        Ok(Dispatches::one(Dispatch::RemainOnlyCurrentComponent)
-            .append(Dispatch::DocumentDidSave { path })
-            .chain(self.get_document_did_change_dispatch())
-            .append(Dispatch::RemainOnlyCurrentComponent)
-            .chain(dispatches)
-            .append_some(if self.selection_set.mode().is_contiguous() {
-                Some(Dispatch::ToEditor(MoveSelection(Movement::Current(
-                    IfCurrentNotFound::LookForward,
-                ))))
-            } else {
-                None
-            }))
+        self.finish_save(result, context)
     }
 
     fn do_save(&mut self, force: bool, context: &Context) -> anyhow::Result<Dispatches> {
         let last_visible_line = self.last_visible_line(context);
 
-        let (dispatches, path) = if context.is_running_as_embedded() {
-            (Dispatches::default(), self.path())
+        let result = if context.is_running_as_embedded() {
+            crate::buffer::SaveResult {
+                dispatches: Dispatches::default(),
+                outcome: self
+                    .path()
+                    .map(crate::buffer::SaveOutcome::Saved)
+                    .unwrap_or(crate::buffer::SaveOutcome::Pathless),
+                content_changed: false,
+            }
         } else {
             self.buffer.borrow_mut().save(
                 context,
@@ -2978,18 +2973,33 @@ impl Editor {
             )?
         };
 
-        let Some(path) = path else {
-            return Ok(Dispatches::one(Dispatch::OpenSaveAsPrompt));
-        };
+        self.finish_save(result, context)
+    }
+
+    fn finish_save(
+        &mut self,
+        result: crate::buffer::SaveResult,
+        context: &Context,
+    ) -> anyhow::Result<Dispatches> {
+        use crate::buffer::SaveOutcome;
 
         self.clamp(context)?;
         self.cursor_keep_primary_only();
         self.enter_normal_mode(context)?;
-        Ok(Dispatches::one(Dispatch::RemainOnlyCurrentComponent)
-            .append(Dispatch::DocumentDidSave { path })
-            .chain(self.get_document_did_change_dispatch())
+
+        let mut dispatches =
+            Dispatches::one(Dispatch::RemainOnlyCurrentComponent).chain(result.dispatches);
+        if result.content_changed {
+            dispatches = dispatches.chain(self.get_document_did_change_dispatch());
+        }
+        dispatches = match result.outcome {
+            SaveOutcome::Saved(path) => dispatches.append(Dispatch::DocumentDidSave { path }),
+            SaveOutcome::Pathless => dispatches.append(Dispatch::OpenSaveAsPrompt),
+            SaveOutcome::Conflict | SaveOutcome::Unchanged => dispatches,
+        };
+
+        Ok(dispatches
             .append(Dispatch::RemainOnlyCurrentComponent)
-            .chain(dispatches)
             .append_some(if self.selection_set.mode().is_contiguous() {
                 Some(Dispatch::ToEditor(MoveSelection(Movement::Current(
                     IfCurrentNotFound::LookForward,

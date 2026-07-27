@@ -115,7 +115,7 @@ pub fn replace(
         .map(|mut buffer| {
             buffer
                 .save_without_formatting(context, true)
-                .map(|(d, _)| d)
+                .map(|result| result.dispatches)
         })
         .collect::<anyhow::Result<Vec<_>>>()?
         .into_iter()
