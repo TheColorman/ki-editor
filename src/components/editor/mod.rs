@@ -2213,7 +2213,7 @@ impl Editor {
                     )
                     .is_err()
                 {
-                    continue;
+                    return Ok(Either::Left(current_selection));
                 }
                 new_buffer
             };
@@ -2228,9 +2228,7 @@ impl Editor {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            // Why don't we just use `tree.root_node().has_error()` instead?
-            // Because I assume we want to be able to swap even if some part of the tree
-            // contains error
+            // Validate post-edit nodes so unrelated syntax errors elsewhere remain permissible.
             if !selection_mode.is_node()
                 || (!text_at_next_selection.to_string().trim().is_empty()
                     && next_nodes
@@ -2238,10 +2236,11 @@ impl Editor {
                         .all(|next_node| match (current_node, next_node) {
                             (Some(current_node), Some(next_node)) => {
                                 current_node.byte_range().len() == next_node.byte_range().len()
+                                    && !next_node.has_error()
                             }
-                            (_, _) => true,
-                        })
-                    && !new_buffer.has_syntax_error_at(edit_transaction.range()))
+                            (None, None) => true,
+                            _ => false,
+                        }))
             {
                 return Ok(Either::Right(get_actual_edit_transaction(
                     &current_selection,
@@ -2755,7 +2754,8 @@ impl Editor {
         let edit_transaction = EditTransaction::merge(
             edit_transactions
                 .into_iter()
-                .filter_map(|edit_transaction| edit_transaction.ok())
+                .collect::<anyhow::Result<Vec<_>>>()?
+                .into_iter()
                 .filter_map(|edit_transaction| edit_transaction.map_right(Some).right_or(None))
                 .collect(),
         );
