@@ -17,7 +17,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 
 use std::process::{self};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -381,9 +384,13 @@ pub enum FromEditor {
 }
 
 impl FromEditor {
+    pub(crate) fn name(&self) -> &'static str {
+        self.variant_name()
+    }
+
     #[cfg(test)]
     pub fn variant(&self) -> &'static str {
-        self.variant_name()
+        self.name()
     }
 }
 
@@ -394,6 +401,7 @@ pub struct LspServerProcessChannel {
     is_initialized: bool,
     child: Option<process::Child>,
     process_group: ProcessGroup,
+    alive: Arc<AtomicBool>,
     _workspace_data_lease: Option<super::workspace_data::WorkspaceDataLease>,
 }
 
@@ -423,6 +431,7 @@ impl LspServerProcessChannel {
             is_initialized: true,
             child: None,
             process_group: ProcessGroup(0),
+            alive: Arc::new(AtomicBool::new(false)),
             _workspace_data_lease: None,
         }
     }
@@ -448,9 +457,11 @@ impl LspServerProcessChannel {
     }
 
     pub fn is_running(&mut self) -> bool {
-        self.child
-            .as_mut()
-            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        self.alive.load(Ordering::Acquire)
+            && self
+                .child
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
     }
 
     pub fn wait_for_exit_until(mut self, deadline: Instant) {
@@ -483,12 +494,15 @@ impl LspServerProcessChannel {
     }
 
     fn send(&self, message: LspServerProcessMessage) -> anyhow::Result<()> {
+        if !self.alive.load(Ordering::Acquire) {
+            anyhow::bail!("LSP server process stopped");
+        }
         if !self.is_initialized {
             return Ok(());
         }
         self.sender
             .send(message)
-            .map_err(|err| anyhow::anyhow!("Unable to send request: {}", err))
+            .map_err(|_| anyhow::anyhow!("LSP server request channel closed"))
     }
 
     pub fn documents_did_open(
@@ -602,10 +616,13 @@ impl LspServerProcess {
             return Err(error);
         }
 
+        let alive = Arc::new(AtomicBool::new(true));
+        let listener_alive = alive.clone();
         std::thread::spawn(move || {
             if let Err(err) = lsp_server_process.listen(receiver, app_message_sender) {
                 log::error!("Failed to start `lsp_server_process.listen` due to {err:?}");
             }
+            listener_alive.store(false, Ordering::Release);
         });
 
         Ok(Some(LspServerProcessChannel {
@@ -615,6 +632,7 @@ impl LspServerProcess {
             is_initialized: false,
             child: Some(process),
             process_group,
+            alive,
             _workspace_data_lease: workspace_data_lease,
         }))
     }
@@ -947,10 +965,22 @@ impl LspServerProcess {
                         completion_item,
                         params,
                     })),
-                    _ => self.handle_from_editor(from_editor),
+                    _ => {
+                        if self.handle_from_editor(from_editor).is_err_and(|error| {
+                            self.log_editor_message_error(&error);
+                            Self::is_transport_error(&error)
+                        }) {
+                            break;
+                        }
+                    }
                 },
                 LspServerProcessMessage::Throttled(from_editor) => {
-                    self.handle_from_editor(from_editor);
+                    if self.handle_from_editor(from_editor).is_err_and(|error| {
+                        self.log_editor_message_error(&error);
+                        Self::is_transport_error(&error)
+                    }) {
+                        break;
+                    }
                 }
                 LspServerProcessMessage::WorkspaceEditResponse { id, result } => {
                     let response = match result {
@@ -2325,7 +2355,7 @@ impl LspServerProcess {
         )
     }
 
-    fn handle_from_editor(&mut self, from_editor: &FromEditor) {
+    fn handle_from_editor(&mut self, from_editor: &FromEditor) -> anyhow::Result<()> {
         lsp_info!(
             self.lsp_command(),
             "LspServerProcess::handle_from_editor = {}",
@@ -2397,12 +2427,29 @@ impl LspServerProcess {
                 self.text_document_prepare_call_hierarchy(params, direction)
             }
         }
-        .unwrap_or_else(|error| {
-            lsp_info!(
-                self.lsp_command(),
-                "LspServerProcess::handle_from_editor | error={error:?}"
-            );
-        });
+    }
+
+    fn log_editor_message_error(&self, error: &anyhow::Error) {
+        lsp_info!(
+            self.lsp_command(),
+            "LspServerProcess::handle_from_editor | error={error:?}"
+        );
+    }
+
+    fn is_transport_error(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::NotConnected
+                        | std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::WriteZero
+                )
+            })
+        })
     }
 
     fn lsp_command(&self) -> String {
@@ -2595,6 +2642,7 @@ mod test_lsp_server_process {
             is_initialized: false,
             child: Some(child),
             process_group,
+            alive: Arc::new(AtomicBool::new(true)),
             _workspace_data_lease: None,
         };
 
@@ -2651,6 +2699,7 @@ mod test_lsp_server_process {
             is_initialized: false,
             child: Some(child),
             process_group,
+            alive: Arc::new(AtomicBool::new(true)),
             _workspace_data_lease: None,
         };
 
@@ -2716,6 +2765,18 @@ mod test_lsp_server_process {
         assert!(messages.contains("\"method\":\"shutdown\""));
         assert!(messages.contains("\"method\":\"exit\""));
         Ok(())
+    }
+
+    #[test]
+    fn broken_pipe_is_a_transport_error() {
+        let error = anyhow::Error::from(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "server closed stdin",
+        ));
+        assert!(LspServerProcess::is_transport_error(&error));
+        assert!(!LspServerProcess::is_transport_error(&anyhow::anyhow!(
+            "invalid request"
+        )));
     }
 
     #[test]
