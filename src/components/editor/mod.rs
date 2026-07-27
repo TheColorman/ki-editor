@@ -2998,15 +2998,15 @@ impl Editor {
             SaveOutcome::Conflict | SaveOutcome::Unchanged => dispatches,
         };
 
-        Ok(dispatches
-            .append(Dispatch::RemainOnlyCurrentComponent)
-            .append_some(if self.selection_set.mode().is_contiguous() {
+        Ok(
+            dispatches.append_some(if self.selection_set.mode().is_contiguous() {
                 Some(Dispatch::ToEditor(MoveSelection(Movement::Current(
                     IfCurrentNotFound::LookForward,
                 ))))
             } else {
                 None
-            }))
+            }),
+        )
     }
 
     /// Clamp everything that might be out of bound after the buffer content is modified elsewhere
