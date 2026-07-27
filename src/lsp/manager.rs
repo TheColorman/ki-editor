@@ -83,12 +83,73 @@ fn contains_file_with_extension(path: &Path, extensions: &[&str]) -> bool {
 mod tests {
     use super::*;
 
+    fn manager_with_disconnected_server(path: &AbsolutePath) -> anyhow::Result<LspManager> {
+        let language = crate::config::from_path(path)
+            .ok_or_else(|| anyhow::anyhow!("test path has no configured language"))?;
+        let config = language
+            .lsp_server_configs()
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("test language has no configured LSP server"))?;
+        let root: AbsolutePath = path
+            .as_ref()
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("test path has no parent"))?
+            .try_into()?;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut manager = LspManager::new(sender, root.clone());
+        let key = LspManager::server_key(&language, config.id(), root.clone())
+            .ok_or_else(|| anyhow::anyhow!("test language has no ID"))?;
+        manager.lsp_server_process_channels.insert(
+            key,
+            LspServerProcessChannel::disconnected_for_test(language, config),
+        );
+        Ok(manager)
+    }
+
     #[test]
     fn did_close_is_a_lifecycle_message() -> anyhow::Result<()> {
         let path = std::env::current_dir()?.try_into()?;
         assert!(LspManager::is_lifecycle_message(
             &FromEditor::TextDocumentDidClose { file_path: path }
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn disconnected_server_does_not_fail_document_lifecycle() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let path: AbsolutePath = tempdir.path().join("main.rs").try_into()?;
+        let mut manager = manager_with_disconnected_server(&path)?;
+
+        manager.send_message(
+            path.clone(),
+            FromEditor::TextDocumentDidChange {
+                file_path: path,
+                version: 1,
+                content: "fn main() {}".to_string(),
+            },
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn disconnected_server_still_fails_interactive_request() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let path: AbsolutePath = tempdir.path().join("main.rs").try_into()?;
+        let mut manager = manager_with_disconnected_server(&path)?;
+        let result = manager.send_message(
+            path.clone(),
+            FromEditor::TextDocumentHover(crate::app::RequestParams {
+                path,
+                position: Default::default(),
+                selection_end: Default::default(),
+                context: Default::default(),
+            }),
+        );
+
+        assert!(result.is_err());
         Ok(())
     }
 
@@ -643,14 +704,29 @@ impl LspManager {
                 .collect()
         };
 
-        for config in configs {
-            if let Some(channel) = Self::server_key(&language, config.id(), root.clone())
-                .and_then(|key| self.lsp_server_process_channels.get(&key))
-            {
-                f(channel)?;
+        let errors = configs
+            .into_iter()
+            .filter_map(|config| {
+                Self::server_key(&language, config.id(), root.clone())
+                    .and_then(|key| self.lsp_server_process_channels.get(&key))
+            })
+            .filter_map(|channel| f(channel).err())
+            .collect::<Vec<_>>();
+
+        if Self::is_lifecycle_message(from_editor) {
+            for error in errors {
+                log::warn!(
+                    "Failed to notify an LSP server of {from_editor:?}: {error:?}"
+                );
             }
+            Ok(())
+        } else if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Failed to send {from_editor:?} to LSP servers: {errors:?}"
+            ))
         }
-        Ok(())
     }
 
     pub fn send_message(

@@ -409,6 +409,24 @@ impl Drop for LspServerProcessChannel {
 }
 
 impl LspServerProcessChannel {
+    #[cfg(test)]
+    pub(crate) fn disconnected_for_test(
+        language: Language,
+        server_config: LspServerConfig,
+    ) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(receiver);
+        Self {
+            language,
+            server_config,
+            sender,
+            is_initialized: true,
+            child: None,
+            process_group: ProcessGroup(0),
+            _workspace_data_lease: None,
+        }
+    }
+
     pub fn new(
         language: Language,
         server_config: LspServerConfig,
