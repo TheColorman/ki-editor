@@ -8,7 +8,14 @@ use crate::app::AppMessage;
 use crate::lsp::server_config::resolve_configured_path;
 
 use super::process::{FromEditor, LspServerProcessChannel, OpenDocument};
-use shared::{absolute_path::AbsolutePath, language::Language};
+use shared::{
+    absolute_path::AbsolutePath,
+    language::{Language, LspServerConfig},
+};
+
+const LSP_RESTART_BASE_DELAY: Duration = Duration::from_millis(250);
+const LSP_RESTART_MAX_DELAY: Duration = Duration::from_secs(30);
+const LSP_STABLE_UPTIME: Duration = Duration::from_secs(30);
 
 fn is_package_workspace_root(path: &Path) -> bool {
     [
@@ -125,12 +132,20 @@ mod tests {
         manager.send_message(
             path.clone(),
             FromEditor::TextDocumentDidChange {
-                file_path: path,
+                file_path: path.clone(),
                 version: 1,
                 content: "fn main() {}".to_string(),
             },
         )?;
 
+        assert!(manager.lsp_server_process_channels.is_empty());
+        assert_eq!(manager.restart_states.len(), 1);
+        assert!(!manager.should_restart_for_path(&path));
+        manager
+            .restart_states
+            .values_mut()
+            .for_each(|state| state.retry_at = Instant::now());
+        assert!(manager.should_restart_for_path(&path));
         Ok(())
     }
 
@@ -143,14 +158,26 @@ mod tests {
             path.clone(),
             FromEditor::TextDocumentHover(crate::app::RequestParams {
                 path,
-                position: Default::default(),
-                selection_end: Default::default(),
-                context: Default::default(),
+                position: crate::position::Position::default(),
+                selection_end: crate::position::Position::default(),
+                context: crate::lsp::process::ResponseContext::default(),
             }),
         );
 
-        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("stopped"));
+        assert!(!error.contains("closed channel"));
+        assert!(manager.lsp_server_process_channels.is_empty());
+        assert_eq!(manager.restart_states.len(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn restart_delay_is_exponential_and_bounded() {
+        assert_eq!(LspManager::restart_delay(1), Duration::from_millis(250));
+        assert_eq!(LspManager::restart_delay(2), Duration::from_millis(500));
+        assert_eq!(LspManager::restart_delay(8), Duration::from_secs(30));
+        assert_eq!(LspManager::restart_delay(u32::MAX), Duration::from_secs(30));
     }
 
     #[test]
@@ -507,8 +534,15 @@ struct LspServerKey {
     root: AbsolutePath,
 }
 
+struct RestartState {
+    failures: u32,
+    retry_at: Instant,
+    started_at: Option<Instant>,
+}
+
 pub struct LspManager {
     lsp_server_process_channels: HashMap<LspServerKey, LspServerProcessChannel>,
+    restart_states: HashMap<LspServerKey, RestartState>,
     sender: crossbeam_channel::Sender<AppMessage>,
     current_working_directory: AbsolutePath,
     #[cfg(test)]
@@ -535,6 +569,7 @@ impl LspManager {
     ) -> LspManager {
         LspManager {
             lsp_server_process_channels: HashMap::new(),
+            restart_states: HashMap::new(),
             sender,
             current_working_directory,
             #[cfg(test)]
@@ -554,6 +589,116 @@ impl LspManager {
             server_id: server_id.to_string(),
             root,
         })
+    }
+
+    fn restart_delay(failures: u32) -> Duration {
+        let multiplier = 1_u32
+            .checked_shl(failures.saturating_sub(1).min(16))
+            .unwrap_or(u32::MAX);
+        LSP_RESTART_BASE_DELAY
+            .saturating_mul(multiplier)
+            .min(LSP_RESTART_MAX_DELAY)
+    }
+
+    fn record_server_failure(&mut self, key: LspServerKey) {
+        let now = Instant::now();
+        let state = self.restart_states.entry(key).or_insert(RestartState {
+            failures: 0,
+            retry_at: now,
+            started_at: None,
+        });
+        if state
+            .started_at
+            .is_some_and(|started_at| now.duration_since(started_at) >= LSP_STABLE_UPTIME)
+        {
+            state.failures = 0;
+        }
+        state.failures = state.failures.saturating_add(1);
+        state.retry_at = now + Self::restart_delay(state.failures);
+        state.started_at = None;
+    }
+
+    fn record_server_started(&mut self, key: LspServerKey) {
+        let now = Instant::now();
+        self.restart_states
+            .entry(key)
+            .and_modify(|state| state.started_at = Some(now))
+            .or_insert(RestartState {
+                failures: 0,
+                retry_at: now,
+                started_at: Some(now),
+            });
+    }
+
+    fn server_can_start(&self, key: &LspServerKey) -> bool {
+        self.restart_states
+            .get(key)
+            .is_none_or(|state| state.started_at.is_some() || Instant::now() >= state.retry_at)
+    }
+
+    fn should_restart_for_path(&self, path: &AbsolutePath) -> bool {
+        let Some(language) = crate::config::from_path(path) else {
+            return false;
+        };
+        let root = self.lsp_root_for_path(&language, path);
+        language.lsp_server_configs().into_iter().any(|config| {
+            Self::server_key(&language, config.id(), root.clone()).is_some_and(|key| {
+                !self.lsp_server_process_channels.contains_key(&key)
+                    && self.restart_states.contains_key(&key)
+                    && self.server_can_start(&key)
+            })
+        })
+    }
+
+    fn start_server(
+        &mut self,
+        language: &Language,
+        config: LspServerConfig,
+        root: AbsolutePath,
+        path: &AbsolutePath,
+    ) -> anyhow::Result<()> {
+        let Some(server_key) = Self::server_key(language, config.id(), root.clone()) else {
+            return Ok(());
+        };
+        if !self.server_can_start(&server_key) {
+            return Ok(());
+        }
+
+        let is_primary = config.primary();
+        let server_id = config.id().to_string();
+        let command = config.process_command().to_string();
+        self.warn_missing_configured_lsp_paths(&root, &server_id, &config);
+        match LspServerProcessChannel::new(
+            language.clone(),
+            config,
+            self.sender.clone(),
+            root.clone(),
+        ) {
+            Ok(Some(channel)) => {
+                log::info!(
+                    "Started LSP server '{server_id}' ({command}) for {path:?} with root {root:?}"
+                );
+                self.lsp_server_process_channels
+                    .insert(server_key.clone(), channel);
+                self.record_server_started(server_key);
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(error) => {
+                self.record_server_failure(server_key);
+                if is_primary {
+                    log::error!(
+                        "Failed to start primary LSP server '{server_id}' ({command}) for {path:?}: {error:?}"
+                    );
+                    Err(error)
+                } else {
+                    log::warn!(
+                        "Failed to start secondary LSP server '{server_id}' ({command}) for {path:?}: {error:?}"
+                    );
+                    Ok(())
+                }
+            }
+        }
     }
 
     pub(crate) fn lsp_root_for_path(
@@ -685,7 +830,7 @@ impl LspManager {
     }
 
     fn invoke_channels(
-        &self,
+        &mut self,
         path: &AbsolutePath,
         from_editor: &FromEditor,
         f: impl Fn(&LspServerProcessChannel) -> anyhow::Result<()>,
@@ -704,25 +849,42 @@ impl LspManager {
                 .collect()
         };
 
-        let errors = configs
-            .into_iter()
-            .filter_map(|config| {
-                Self::server_key(&language, config.id(), root.clone())
-                    .and_then(|key| self.lsp_server_process_channels.get(&key))
-            })
-            .filter_map(|channel| f(channel).err())
-            .collect::<Vec<_>>();
+        let mut errors = Vec::new();
+        for config in configs {
+            let Some(key) = Self::server_key(&language, config.id(), root.clone()) else {
+                continue;
+            };
+            let result = match self.lsp_server_process_channels.get_mut(&key) {
+                Some(channel) => {
+                    if channel.is_running() {
+                        f(channel)
+                    } else {
+                        Err(anyhow::anyhow!("LSP server '{}' stopped", config.id()))
+                    }
+                }
+                None => continue,
+            };
+            if let Err(error) = result {
+                self.lsp_server_process_channels.remove(&key);
+                self.record_server_failure(key);
+                errors.push(error);
+            }
+        }
 
         if Self::is_lifecycle_message(from_editor) {
             for error in errors {
-                log::warn!("Failed to notify an LSP server of {from_editor:?}: {error:?}");
+                log::warn!(
+                    "Failed to notify an LSP server of {}: {error:?}",
+                    from_editor.name()
+                );
             }
             Ok(())
         } else if errors.is_empty() {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
-                "Failed to send {from_editor:?} to LSP servers: {errors:?}"
+                "Failed to send {} to LSP servers: {errors:?}",
+                from_editor.name()
             ))
         }
     }
@@ -735,6 +897,24 @@ impl LspManager {
         #[cfg(test)]
         self.history
             .insert(from_editor.variant(), from_editor.clone());
+
+        if self.should_restart_for_path(&path) {
+            let restart_result = self.open_file_inner(
+                OpenDocument {
+                    path: path.clone(),
+                    version: 0,
+                    content: String::new(),
+                },
+                false,
+            );
+            if let Err(error) = restart_result {
+                if Self::is_lifecycle_message(&from_editor) {
+                    log::warn!("Failed to restart an LSP server for {path:?}: {error:?}");
+                } else {
+                    return Err(error);
+                }
+            }
+        }
 
         self.invoke_channels(&path, &from_editor, |channel| {
             channel.send_from_editor(from_editor.clone())
@@ -779,41 +959,14 @@ impl LspManager {
                     config.id()
                 );
                 self.lsp_server_process_channels.remove(&server_key);
+                self.record_server_failure(server_key.clone());
             }
             if let Some(channel) = self.lsp_server_process_channels.get(&server_key) {
                 if notify_healthy_server && channel.is_initialized() {
                     channel.document_did_open(document.clone())?;
                 }
             } else {
-                let is_primary = config.primary();
-                let server_id = config.id().to_string();
-                let command = config.process_command().to_string();
-                self.warn_missing_configured_lsp_paths(&lsp_root, &server_id, &config);
-                match LspServerProcessChannel::new(
-                    language.clone(),
-                    config,
-                    self.sender.clone(),
-                    lsp_root.clone(),
-                ) {
-                    Ok(Some(channel)) => {
-                        log::info!(
-                            "Started LSP server '{server_id}' ({command}) for {path:?} with root {lsp_root:?}"
-                        );
-                        self.lsp_server_process_channels.insert(server_key, channel);
-                    }
-                    Ok(None) => {}
-                    Err(error) if is_primary => {
-                        log::error!(
-                            "Failed to start primary LSP server '{server_id}' ({command}) for {path:?}: {error:?}"
-                        );
-                        return Err(error);
-                    }
-                    Err(error) => {
-                        log::warn!(
-                            "Failed to start secondary LSP server '{server_id}' ({command}) for {path:?}: {error:?}"
-                        );
-                    }
-                }
+                self.start_server(&language, config, lsp_root, path)?;
             }
         }
 
