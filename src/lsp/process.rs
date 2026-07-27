@@ -189,6 +189,7 @@ struct LspServerProcess {
     stderr: Option<process::ChildStderr>,
 
     server_capabilities: Option<ServerCapabilities>,
+    synchronized_documents: HashMap<AbsolutePath, SynchronizedDocument>,
     current_working_directory: AbsolutePath,
     next_request_id: RequestId,
     pending_response_requests: HashMap<RequestId, PendingResponseRequest>,
@@ -198,6 +199,11 @@ struct LspServerProcess {
     sender: Sender<LspServerProcessMessage>,
     progress_notification_manager: ProgressNotificationManager,
     is_initialized: bool,
+}
+
+struct SynchronizedDocument {
+    content: String,
+    version: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -593,6 +599,7 @@ impl LspServerProcess {
             pending_response_requests: HashMap::new(),
             pending_call_hierarchy_directions: HashMap::new(),
             server_capabilities: None,
+            synchronized_documents: HashMap::new(),
             app_message_sender: app_message_sender.clone(),
             sender: sender.clone(),
             progress_notification_manager: ProgressNotificationManager::new(
@@ -1784,21 +1791,28 @@ impl LspServerProcess {
         version: i32,
         content: String,
     ) -> Result<(), anyhow::Error> {
-        if !self.has_capability(Self::server_supports_text_document_open_close) {
-            return Ok(());
+        let supports_open_close =
+            self.has_capability(Self::server_supports_text_document_open_close);
+        if supports_open_close {
+            self.send_notification::<lsp_notification!("textDocument/didOpen")>(
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri: path_buf_to_url(file_path.clone())?,
+                        language_id,
+                        version,
+                        text: content.clone(),
+                    },
+                },
+            )?;
         }
 
-        self.send_notification::<lsp_notification!("textDocument/didOpen")>(
-            DidOpenTextDocumentParams {
-                text_document: TextDocumentItem {
-                    uri: path_buf_to_url(file_path.clone())?,
-                    language_id,
-                    version,
-                    text: content,
-                },
-            },
-        )?;
-        self.request_document_diagnostics(file_path)
+        self.synchronized_documents
+            .insert(file_path.clone(), SynchronizedDocument { content, version });
+        if supports_open_close {
+            self.request_document_diagnostics(file_path)
+        } else {
+            Ok(())
+        }
     }
 
     fn text_document_did_change(
@@ -1807,9 +1821,43 @@ impl LspServerProcess {
         version: i32,
         content: String,
     ) -> Result<(), anyhow::Error> {
-        if !self.has_capability(Self::server_supports_text_document_change) {
+        let Some(sync_kind) = self
+            .server_capabilities
+            .as_ref()
+            .and_then(Self::server_text_document_sync_kind)
+        else {
             return Ok(());
-        }
+        };
+        let content_change = if sync_kind == TextDocumentSyncKind::FULL {
+            TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: content.clone(),
+            }
+        } else if sync_kind == TextDocumentSyncKind::INCREMENTAL {
+            let previous = self.synchronized_documents.get(&file_path).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot incrementally synchronize {file_path:?} before textDocument/didOpen"
+                )
+            })?;
+            anyhow::ensure!(
+                version > previous.version,
+                "LSP document version must increase for {file_path:?}: {} -> {version}",
+                previous.version
+            );
+            TextDocumentContentChangeEvent {
+                range: Some(Range::new(
+                    Position::new(0, 0),
+                    Self::document_end_position(&previous.content, &self.position_encoding())?,
+                )),
+                range_length: None,
+                text: content.clone(),
+            }
+        } else if sync_kind == TextDocumentSyncKind::NONE {
+            return Ok(());
+        } else {
+            anyhow::bail!("Unsupported text document sync kind: {sync_kind:?}");
+        };
 
         self.send_notification::<lsp_notification!("textDocument/didChange")>(
             DidChangeTextDocumentParams {
@@ -1817,17 +1865,16 @@ impl LspServerProcess {
                     uri: path_buf_to_url(file_path.clone())?,
                     version,
                 },
-                content_changes: vec![TextDocumentContentChangeEvent {
-                    range: None,
-                    range_length: None,
-                    text: content,
-                }],
+                content_changes: vec![content_change],
             },
         )?;
+        self.synchronized_documents
+            .insert(file_path.clone(), SynchronizedDocument { content, version });
         self.request_document_diagnostics(file_path)
     }
 
     fn text_document_did_close(&mut self, file_path: AbsolutePath) -> Result<(), anyhow::Error> {
+        self.synchronized_documents.remove(&file_path);
         if !self.has_capability(Self::server_supports_text_document_open_close) {
             return Ok(());
         }
@@ -1888,6 +1935,7 @@ impl LspServerProcess {
         old: AbsolutePath,
         new: AbsolutePath,
     ) -> Result<(), anyhow::Error> {
+        self.synchronized_documents.remove(&old);
         if !self.has_capability(Self::server_supports_workspace_did_rename_files) {
             return Ok(());
         }
@@ -1928,14 +1976,59 @@ impl LspServerProcess {
         }
     }
 
-    fn server_supports_text_document_change(capabilities: &ServerCapabilities) -> bool {
-        match capabilities.text_document_sync.as_ref() {
-            Some(TextDocumentSyncCapability::Kind(kind)) => *kind != TextDocumentSyncKind::NONE,
-            Some(TextDocumentSyncCapability::Options(options)) => options
-                .change
-                .is_some_and(|kind| kind != TextDocumentSyncKind::NONE),
-            None => false,
+    fn server_text_document_sync_kind(
+        capabilities: &ServerCapabilities,
+    ) -> Option<TextDocumentSyncKind> {
+        match capabilities.text_document_sync.as_ref()? {
+            TextDocumentSyncCapability::Kind(kind) => Some(*kind),
+            TextDocumentSyncCapability::Options(options) => options.change,
         }
+    }
+
+    fn position_encoding(&self) -> PositionEncodingKind {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.position_encoding.clone())
+            .unwrap_or(PositionEncodingKind::UTF16)
+    }
+
+    fn document_end_position(
+        content: &str,
+        encoding: &PositionEncodingKind,
+    ) -> anyhow::Result<Position> {
+        let mut line = 0_u32;
+        let mut character = 0_u32;
+        let mut chars = content.chars().peekable();
+        while let Some(char) = chars.next() {
+            if char == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                line = line
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("Document has too many lines for LSP"))?;
+                character = 0;
+            } else if char == '\n' {
+                line = line
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("Document has too many lines for LSP"))?;
+                character = 0;
+            } else {
+                let width = if encoding == &PositionEncodingKind::UTF8 {
+                    char.len_utf8()
+                } else if encoding == &PositionEncodingKind::UTF16 {
+                    char.len_utf16()
+                } else if encoding == &PositionEncodingKind::UTF32 {
+                    1
+                } else {
+                    anyhow::bail!("Unsupported LSP position encoding: {encoding:?}");
+                };
+                character = character
+                    .checked_add(width.try_into()?)
+                    .ok_or_else(|| anyhow::anyhow!("Document line is too long for LSP"))?;
+            }
+        }
+        Ok(Position::new(line, character))
     }
 
     fn server_supports_text_document_save(capabilities: &ServerCapabilities) -> bool {
@@ -2594,6 +2687,7 @@ mod test_lsp_server_process {
             stdout: None,
             stderr: Some(stderr),
             server_capabilities: None,
+            synchronized_documents: HashMap::new(),
             current_working_directory: std::env::current_dir()?.try_into()?,
             next_request_id: 0,
             pending_response_requests: HashMap::new(),
@@ -2616,6 +2710,45 @@ mod test_lsp_server_process {
             tempdir,
             messages_path,
         ))
+    }
+
+    fn read_json_rpc_messages(path: &std::path::Path) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut reader = BufReader::new(std::fs::File::open(path)?);
+        let mut messages = Vec::new();
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header)? == 0 {
+                break;
+            }
+            let content_length = header
+                .strip_prefix("Content-Length: ")
+                .and_then(|header| header.trim().parse::<usize>().ok())
+                .ok_or_else(|| anyhow::anyhow!("Invalid LSP header: {header:?}"))?;
+            loop {
+                header.clear();
+                reader.read_line(&mut header)?;
+                if header == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body)?;
+            messages.push(serde_json::from_slice(&body)?);
+        }
+        Ok(messages)
+    }
+
+    fn sync_capabilities(kind: TextDocumentSyncKind) -> ServerCapabilities {
+        ServerCapabilities {
+            text_document_sync: Some(TextDocumentSyncCapability::Options(
+                TextDocumentSyncOptions {
+                    open_close: Some(true),
+                    change: Some(kind),
+                    ..TextDocumentSyncOptions::default()
+                },
+            )),
+            ..ServerCapabilities::default()
+        }
     }
 
     #[cfg(unix)]
@@ -2738,6 +2871,7 @@ mod test_lsp_server_process {
             stdout: None,
             stderr: Some(stderr),
             server_capabilities: None,
+            synchronized_documents: HashMap::new(),
             current_working_directory: std::env::current_dir()?.try_into()?,
             next_request_id: 0,
             pending_response_requests: HashMap::new(),
@@ -2874,9 +3008,10 @@ mod test_lsp_server_process {
         assert!(!LspServerProcess::server_supports_text_document_open_close(
             &capabilities
         ));
-        assert!(!LspServerProcess::server_supports_text_document_change(
-            &capabilities
-        ));
+        assert_eq!(
+            LspServerProcess::server_text_document_sync_kind(&capabilities),
+            None
+        );
         assert!(!LspServerProcess::server_supports_text_document_save(
             &capabilities
         ));
@@ -2886,9 +3021,10 @@ mod test_lsp_server_process {
         assert!(LspServerProcess::server_supports_text_document_open_close(
             &capabilities
         ));
-        assert!(LspServerProcess::server_supports_text_document_change(
-            &capabilities
-        ));
+        assert_eq!(
+            LspServerProcess::server_text_document_sync_kind(&capabilities),
+            Some(TextDocumentSyncKind::FULL)
+        );
         assert!(!LspServerProcess::server_supports_text_document_save(
             &capabilities
         ));
@@ -2904,12 +3040,159 @@ mod test_lsp_server_process {
         assert!(LspServerProcess::server_supports_text_document_open_close(
             &capabilities
         ));
-        assert!(LspServerProcess::server_supports_text_document_change(
-            &capabilities
-        ));
+        assert_eq!(
+            LspServerProcess::server_text_document_sync_kind(&capabilities),
+            Some(TextDocumentSyncKind::FULL)
+        );
         assert!(LspServerProcess::server_supports_text_document_save(
             &capabilities
         ));
+
+        capabilities.text_document_sync = Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                change: Some(TextDocumentSyncKind::INCREMENTAL),
+                ..TextDocumentSyncOptions::default()
+            },
+        ));
+        assert_eq!(
+            LspServerProcess::server_text_document_sync_kind(&capabilities),
+            Some(TextDocumentSyncKind::INCREMENTAL)
+        );
+
+        capabilities.text_document_sync = Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions::default(),
+        ));
+        assert_eq!(
+            LspServerProcess::server_text_document_sync_kind(&capabilities),
+            None
+        );
+    }
+
+    #[test]
+    fn full_document_change_is_serialized_without_a_range() -> anyhow::Result<()> {
+        let (mut process, mut child, _app_receiver, _sender, _receiver, _tempdir, messages_path) =
+            process_for_server_requests()?;
+        let file_path: AbsolutePath = std::env::current_dir()?.join("main.ts").try_into()?;
+        process.server_capabilities = Some(sync_capabilities(TextDocumentSyncKind::FULL));
+
+        process.text_document_did_open(
+            file_path.clone(),
+            "typescript".to_string(),
+            1,
+            "const old = 1;".to_string(),
+        )?;
+        process.text_document_did_change(file_path, 2, "const updated = 2;".to_string())?;
+        drop(process);
+        child.wait()?;
+
+        let messages = read_json_rpc_messages(&messages_path)?;
+        let change = messages
+            .iter()
+            .find(|message| message["method"] == "textDocument/didChange")
+            .ok_or_else(|| anyhow::anyhow!("missing didChange notification"))?;
+        let event = &change["params"]["contentChanges"][0];
+        assert_eq!(change["params"]["textDocument"]["version"], 2);
+        assert_eq!(event["text"], "const updated = 2;");
+        assert!(event.get("range").is_none_or(serde_json::Value::is_null));
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_changes_replace_the_previous_document_range() -> anyhow::Result<()> {
+        let (mut process, mut child, _app_receiver, _sender, _receiver, _tempdir, messages_path) =
+            process_for_server_requests()?;
+        let file_path: AbsolutePath = std::env::current_dir()?.join("main.vue").try_into()?;
+        process.server_capabilities = Some(sync_capabilities(TextDocumentSyncKind::INCREMENTAL));
+
+        process.text_document_did_open(
+            file_path.clone(),
+            "vue".to_string(),
+            1,
+            "a😀\r\nb".to_string(),
+        )?;
+        process.text_document_did_change(file_path.clone(), 2, "x\n".to_string())?;
+        process.text_document_did_change(file_path.clone(), 3, "final".to_string())?;
+        process.text_document_did_close(file_path.clone())?;
+        assert!(!process.synchronized_documents.contains_key(&file_path));
+        drop(process);
+        child.wait()?;
+
+        let messages = read_json_rpc_messages(&messages_path)?;
+        let changes = messages
+            .iter()
+            .filter(|message| message["method"] == "textDocument/didChange")
+            .collect_vec();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(
+            changes[0]["params"]["contentChanges"][0],
+            serde_json::json!({
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 1, "character": 1 }
+                },
+                "text": "x\n"
+            })
+        );
+        assert_eq!(
+            changes[1]["params"]["contentChanges"][0],
+            serde_json::json!({
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 1, "character": 0 }
+                },
+                "text": "final"
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_change_requires_an_open_document_baseline() -> anyhow::Result<()> {
+        let (mut process, mut child, _app_receiver, _sender, _receiver, _tempdir, messages_path) =
+            process_for_server_requests()?;
+        let file_path: AbsolutePath = std::env::current_dir()?.join("main.vue").try_into()?;
+        process.server_capabilities = Some(sync_capabilities(TextDocumentSyncKind::INCREMENTAL));
+
+        let error = process
+            .text_document_did_change(file_path, 2, "content".to_string())
+            .unwrap_err();
+        assert!(error.to_string().contains("before textDocument/didOpen"));
+        drop(process);
+        child.wait()?;
+
+        assert!(read_json_rpc_messages(&messages_path)?
+            .iter()
+            .all(|message| message["method"] != "textDocument/didChange"));
+        Ok(())
+    }
+
+    #[test]
+    fn document_end_position_handles_encodings_and_line_endings() -> anyhow::Result<()> {
+        assert_eq!(
+            LspServerProcess::document_end_position("", &PositionEncodingKind::UTF16)?,
+            Position::new(0, 0)
+        );
+        assert_eq!(
+            LspServerProcess::document_end_position("a😀", &PositionEncodingKind::UTF8)?,
+            Position::new(0, 5)
+        );
+        assert_eq!(
+            LspServerProcess::document_end_position("a😀", &PositionEncodingKind::UTF16)?,
+            Position::new(0, 3)
+        );
+        assert_eq!(
+            LspServerProcess::document_end_position("a😀", &PositionEncodingKind::UTF32)?,
+            Position::new(0, 2)
+        );
+        assert_eq!(
+            LspServerProcess::document_end_position("a\n", &PositionEncodingKind::UTF16)?,
+            Position::new(1, 0)
+        );
+        assert_eq!(
+            LspServerProcess::document_end_position("a\r\nb\rc\n", &PositionEncodingKind::UTF16,)?,
+            Position::new(3, 0)
+        );
+        Ok(())
     }
 
     #[test]
@@ -3121,6 +3404,7 @@ mod test_lsp_server_process {
             stdout: Some(stdout),
             stderr: Some(stderr),
             server_capabilities: None,
+            synchronized_documents: HashMap::new(),
             current_working_directory: std::env::current_dir()?.try_into()?,
             next_request_id: 0,
             pending_response_requests: HashMap::new(),
