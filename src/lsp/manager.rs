@@ -715,9 +715,7 @@ impl LspManager {
 
         if Self::is_lifecycle_message(from_editor) {
             for error in errors {
-                log::warn!(
-                    "Failed to notify an LSP server of {from_editor:?}: {error:?}"
-                );
+                log::warn!("Failed to notify an LSP server of {from_editor:?}: {error:?}");
             }
             Ok(())
         } else if errors.is_empty() {

@@ -3018,9 +3018,33 @@ fn saving_editor_clears_dirty_state() -> anyhow::Result<()> {
             ))),
             Editor(Save),
             Expect(Not(Box::new(EditorIsDirty()))),
+            Expect(LspRequestSent(
+                crate::lsp::process::FromEditor::TextDocumentDidSave {
+                    file_path: s.main_rs(),
+                },
+            )),
             Expect(CurrentComponentTitle(markup_focused_tab(
                 " [ ] 🦀 main.rs ",
             ))),
+        ])
+    })
+}
+
+#[test]
+fn saving_unchanged_editor_does_not_notify_lsp() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(Save),
+            Expect(Not(Box::new(LspRequestSent(
+                crate::lsp::process::FromEditor::TextDocumentDidSave {
+                    file_path: s.main_rs(),
+                },
+            )))),
         ])
     })
 }
@@ -6197,6 +6221,11 @@ fn save_conflict_resolved_by_force_reload() -> anyhow::Result<()> {
                 .to_vec(),
             ),
             Editor(Save),
+            Expect(Not(Box::new(LspRequestSent(
+                crate::lsp::process::FromEditor::TextDocumentDidSave {
+                    file_path: s.main_rs(),
+                },
+            )))),
             Expect(CurrentComponentTitle(
                 "Failed to save src/main.rs: The content of the file is newer.".to_string(),
             )),
