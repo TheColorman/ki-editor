@@ -842,20 +842,6 @@ impl Buffer {
         &self.batch_id
     }
 
-    pub fn has_syntax_error_at(&self, range: CharIndexRange) -> bool {
-        let rope = &self.rope;
-        if let Some(node) = self.tree.as_ref().and_then(|tree| {
-            tree.root_node().descendant_for_byte_range(
-                rope.try_char_to_byte(range.start.0).unwrap_or(0),
-                rope.try_char_to_byte(range.end.0).unwrap_or(0),
-            )
-        }) {
-            node.has_error()
-        } else {
-            false
-        }
-    }
-
     pub fn from_path(path: &AbsolutePath, enable_tree_sitter: bool) -> anyhow::Result<Buffer> {
         let content = path.read()?;
         let language = if enable_tree_sitter {

@@ -34,6 +34,7 @@ use itertools::Itertools;
 use lazy_regex::regex;
 use my_proc_macros::{hex, key, keys};
 use serial_test::serial;
+use shared::absolute_path::AbsolutePath;
 
 use SelectionMode::*;
 
@@ -916,6 +917,135 @@ fn raise() -> anyhow::Result<()> {
             Expect(CurrentComponentContent("fn main() { let x = c(); }")),
             Editor(Eat(Expand)),
             Expect(CurrentComponentContent("fn main() { c() }")),
+        ])
+    })
+}
+
+#[test]
+fn raise_csharp_invocation_argument() -> anyhow::Result<()> {
+    execute_test(|s| {
+        let path: AbsolutePath = s.new_path("main.cs").try_into().unwrap();
+        let input = "public class WebvisitService(UXVDbContext context) : BaseService(context), IWebvisitService
+{
+    public async Task<Result<LeadfeedAlreadyAddedDTO>> CreateLeadfeedLeads(
+        List<LeadfeedLead> lfLeads
+    )
+    {
+        List<string> alreadyAdded = [];
+
+        foreach (LeadfeedLead lead in lfLeads)
+        {
+            Result<LeadfeedLeadDTO> createdResult = await CreateLeadfeedLead(lead);
+
+            if (
+                createdResult.IsFailure
+                && lead.Id.Equals(
+                    $\"Leadfeed Lead with id '{lead.Id}' already exists.\"
+                )
+            )
+            {
+                alreadyAdded.Add(lead.Id);
+            }
+            else if (createdResult.IsFailure)
+            {
+                return Result<LeadfeedAlreadyAddedDTO>.Failure(createdResult.Error);
+            }
+        }
+
+        return Result<LeadfeedAlreadyAddedDTO>.Success(new() { AlreadyAdded = alreadyAdded });
+    }
+
+    public void Other() {}
+}";
+        Box::new([
+            App(SetFileContent(path.clone(), input.to_string())),
+            App(OpenFile {
+                path,
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("createdResult.Error".to_string())),
+            Editor(SetSelectionMode(IfCurrentNotFound::LookForward, SyntaxNode)),
+            Editor(Eat(Up)),
+            Expect(CurrentComponentContent("public class WebvisitService(UXVDbContext context) : BaseService(context), IWebvisitService
+{
+    public async Task<Result<LeadfeedAlreadyAddedDTO>> CreateLeadfeedLeads(
+        List<LeadfeedLead> lfLeads
+    )
+    {
+        List<string> alreadyAdded = [];
+
+        foreach (LeadfeedLead lead in lfLeads)
+        {
+            Result<LeadfeedLeadDTO> createdResult = await CreateLeadfeedLead(lead);
+
+            if (
+                createdResult.IsFailure
+                && lead.Id.Equals(
+                    $\"Leadfeed Lead with id '{lead.Id}' already exists.\"
+                )
+            )
+            {
+                alreadyAdded.Add(lead.Id);
+            }
+            else if (createdResult.IsFailure)
+            {
+                return createdResult.Error;
+            }
+        }
+
+        return Result<LeadfeedAlreadyAddedDTO>.Success(new() { AlreadyAdded = alreadyAdded });
+    }
+
+    public void Other() {}
+}")),
+            Expect(CurrentSelectedTexts(&["createdResult.Error"])),
+        ])
+    })
+}
+
+#[test]
+fn raise_does_not_accept_erroneous_csharp_parent() -> anyhow::Result<()> {
+    execute_test(|s| {
+        let path: AbsolutePath = s.new_path("main.cs").try_into().unwrap();
+        let input = "class C { object M() { return value; } }";
+        Box::new([
+            App(SetFileContent(path.clone(), input.to_string())),
+            App(OpenFile {
+                path,
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("value".to_string())),
+            Editor(SetSelectionMode(IfCurrentNotFound::LookForward, SyntaxNode)),
+            Editor(Eat(Up)),
+            Expect(CurrentComponentContent(input)),
+            Expect(CurrentSelectedTexts(&["value"])),
+        ])
+    })
+}
+
+#[test]
+fn raise_csharp_with_unrelated_syntax_error() -> anyhow::Result<()> {
+    execute_test(|s| {
+        let path: AbsolutePath = s.new_path("main.cs").try_into().unwrap();
+        Box::new([
+            App(SetFileContent(
+                path.clone(),
+                "class C { object M() { return Wrap(value); } void Broken( }".to_string(),
+            )),
+            App(OpenFile {
+                path,
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("value".to_string())),
+            Editor(SetSelectionMode(IfCurrentNotFound::LookForward, SyntaxNode)),
+            Editor(Eat(Up)),
+            Expect(CurrentComponentContent(
+                "class C { object M() { return value; } void Broken( }",
+            )),
+            Expect(CurrentSelectedTexts(&["value"])),
         ])
     })
 }
