@@ -30,6 +30,7 @@ use crate::{
     themes::Theme,
 };
 
+use event::event::Event;
 use itertools::Itertools;
 use lazy_regex::regex;
 use my_proc_macros::{hex, key, keys};
@@ -1337,6 +1338,24 @@ fn paste_in_insert_mode_1() -> anyhow::Result<()> {
             Expect(CurrentComponentContent("foo barhaha spam")),
             Editor(Insert("Hello".to_string())),
             Expect(CurrentComponentContent("foo barhahaHello spam")),
+        ])
+    })
+}
+
+#[serial]
+#[test]
+fn terminal_paste_normalizes_carriage_returns() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent("".to_string())),
+            Editor(EnterInsertMode(Direction::Start)),
+            App(HandleEvent(Event::Paste("a\r\nb\rc".to_string()))),
+            Expect(CurrentComponentContent("a\nb\nc")),
         ])
     })
 }

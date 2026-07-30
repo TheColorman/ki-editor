@@ -2,6 +2,8 @@ use indexmap::IndexSet;
 use itertools::Itertools;
 use nonempty::NonEmpty;
 
+use crate::utils::normalize_line_endings_to_lf;
+
 #[derive(Clone)]
 pub struct Clipboard {
     history: RingHistory<Texts>,
@@ -17,7 +19,9 @@ pub struct Texts {
 }
 impl Texts {
     pub fn new(texts: NonEmpty<String>) -> Self {
-        Self { texts }
+        Self {
+            texts: texts.map(|text| normalize_line_endings_to_lf(&text)),
+        }
     }
 
     fn join(&self, separator: &str) -> String {
@@ -39,6 +43,16 @@ impl Texts {
 
     pub fn to_text(&self) -> String {
         self.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Texts;
+
+    #[test]
+    fn normalizes_carriage_returns() {
+        assert_eq!(Texts::one("a\r\nb\rc".to_string()).to_text(), "a\nb\nc");
     }
 }
 
