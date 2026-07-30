@@ -311,6 +311,42 @@ fn should_reveal_marks_across_files_without_quickfix_list() -> Result<(), anyhow
 }
 
 #[test]
+fn global_reveal_marks_should_render_extended_selection() -> Result<(), anyhow::Error> {
+    execute_test(|s| {
+        Box::new([
+            App(TerminalDimensionChanged(Dimension {
+                width: 100,
+                height: 3,
+            })),
+            App(SetFileContent(s.foo_rs(), "foo".to_string())),
+            App(SetFileContent(s.main_rs(), "top\nbottom".to_string())),
+            App(OpenFile {
+                path: s.foo_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("foo".to_string())),
+            App(ToggleSelectionMark),
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(MatchLiteral("bottom".to_string())),
+            App(ToggleSelectionMark),
+            Editor(SetSelectionMode(
+                IfCurrentNotFound::LookForward,
+                SelectionMode::Line,
+            )),
+            App(ToggleRevealMarks),
+            App(HandleKeyEvents(keys!("f i").to_vec())),
+            Expect(SelectionExtensionEnabled(true)),
+            Expect(AppGridContains("█op")),
+        ])
+    })
+}
+
+#[test]
 fn should_reveal_marks_from_other_files_when_current_file_has_no_marks() -> Result<(), anyhow::Error>
 {
     execute_test(|s| {
