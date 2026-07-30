@@ -289,7 +289,12 @@ impl Editor {
         .chain(
             // The primary selection should always be rendered as a section
             buffer
-                .char_index_range_to_byte_range(self.selection_set.primary_selection().range())
+                .char_index_range_to_byte_range(match reveal {
+                    Reveal::CurrentSelectionMode | Reveal::Mark => {
+                        self.selection_set.primary_selection().extended_range()
+                    }
+                    Reveal::Cursor => self.selection_set.primary_selection().range(),
+                })
                 .ok(),
         )
         .sorted_by_key(|range| (range.start, range.end))
