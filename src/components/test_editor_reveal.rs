@@ -122,6 +122,33 @@ zeta
 }
 
 #[test]
+fn reveal_mark_selection_extension() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetRectangle(Rectangle {
+                origin: Position::new(0, 0),
+                width: 20,
+                height: 1,
+            })),
+            Editor(SetContent("foo\nbar".to_string())),
+            Editor(MatchLiteral("bar".to_string())),
+            App(ToggleSelectionMark),
+            Editor(ToggleReveal(Reveal::Mark)),
+            Editor(EnableSelectionExtension),
+            Editor(SetSelectionMode(IfCurrentNotFound::LookForward, Line)),
+            Editor(MoveSelection(Up)),
+            Expect(EditorGrid("1│█oo")),
+            Expect(SelectionExtensionEnabled(true)),
+        ])
+    })
+}
+
+#[test]
 fn reveal_selections() -> anyhow::Result<()> {
     execute_test(|s| {
         Box::new([
