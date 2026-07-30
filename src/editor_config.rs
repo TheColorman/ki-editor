@@ -1,26 +1,11 @@
 use shared::absolute_path::AbsolutePath;
 
+use crate::utils::normalize_line_endings_to_lf;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct IndentSettings {
     char: char,
     width: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EndOfLine {
-    Cr,
-    Crlf,
-    Lf,
-}
-
-impl EndOfLine {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Cr => "\r",
-            Self::Crlf => "\r\n",
-            Self::Lf => "\n",
-        }
-    }
 }
 
 impl IndentSettings {
@@ -41,7 +26,6 @@ impl IndentSettings {
 pub(crate) struct EditorConfigSettings {
     indent_char: Option<char>,
     indent_width: Option<usize>,
-    end_of_line: Option<EndOfLine>,
     insert_final_newline: Option<bool>,
     trim_trailing_whitespace: Option<bool>,
 }
@@ -65,14 +49,6 @@ impl EditorConfigSettings {
     }
 
     pub(crate) fn format_content_for_save(&self, content: &str) -> String {
-        if self.end_of_line.is_none()
-            && self.insert_final_newline != Some(true)
-            && self.trim_trailing_whitespace != Some(true)
-        {
-            return content.to_string();
-        }
-
-        let end_of_line = self.end_of_line.or_else(|| detect_end_of_line(content));
         let mut content = normalize_line_endings_to_lf(content);
 
         if self.trim_trailing_whitespace == Some(true) {
@@ -90,17 +66,12 @@ impl EditorConfigSettings {
             content.push('\n');
         }
 
-        match end_of_line {
-            Some(EndOfLine::Cr) => content.replace('\n', EndOfLine::Cr.as_str()),
-            Some(EndOfLine::Crlf) => content.replace('\n', EndOfLine::Crlf.as_str()),
-            Some(EndOfLine::Lf) | None => content,
-        }
+        content
     }
 
     fn from_properties(properties: &std::collections::HashMap<String, String>) -> Self {
         let indent_style = property(properties, "indent_style");
         let indent_size = property(properties, "indent_size");
-        let end_of_line = property(properties, "end_of_line");
         let insert_final_newline = property(properties, "insert_final_newline");
         let trim_trailing_whitespace = property(properties, "trim_trailing_whitespace");
 
@@ -119,7 +90,6 @@ impl EditorConfigSettings {
         Self {
             indent_char,
             indent_width,
-            end_of_line: end_of_line.and_then(parse_end_of_line),
             insert_final_newline: insert_final_newline.and_then(parse_bool),
             trim_trailing_whitespace: trim_trailing_whitespace.and_then(parse_bool),
         }
@@ -146,32 +116,6 @@ fn parse_bool(value: &str) -> Option<bool> {
         "false" => Some(false),
         _ => None,
     }
-}
-
-fn parse_end_of_line(value: &str) -> Option<EndOfLine> {
-    match value {
-        "cr" => Some(EndOfLine::Cr),
-        "crlf" => Some(EndOfLine::Crlf),
-        "lf" => Some(EndOfLine::Lf),
-        _ => None,
-    }
-}
-
-fn detect_end_of_line(content: &str) -> Option<EndOfLine> {
-    let mut chars = content.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\r' if chars.peek() == Some(&'\n') => return Some(EndOfLine::Crlf),
-            '\r' => return Some(EndOfLine::Cr),
-            '\n' => return Some(EndOfLine::Lf),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn normalize_line_endings_to_lf(content: &str) -> String {
-    content.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 #[cfg(test)]
@@ -246,22 +190,22 @@ mod tests {
     }
 
     #[test]
-    fn applies_crlf_line_endings_on_save() {
+    fn ignores_crlf_line_endings_on_save() {
         assert_eq!(
             config(&[("end_of_line", "crlf")]).format_content_for_save("a\nb\n"),
-            "a\r\nb\r\n"
+            "a\nb\n"
         );
     }
 
     #[test]
-    fn false_save_properties_do_not_change_content() {
+    fn false_save_properties_still_normalize_line_endings() {
         assert_eq!(
             config(&[
                 ("insert_final_newline", "false"),
                 ("trim_trailing_whitespace", "false"),
             ])
             .format_content_for_save("a  \r\nb"),
-            "a  \r\nb"
+            "a  \nb"
         );
     }
 }
