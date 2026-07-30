@@ -120,7 +120,11 @@ impl Component for Editor {
         content: String,
         context: &Context,
     ) -> anyhow::Result<Dispatches> {
-        self.insert(&content, context, EditHistoryKind::Coarse)
+        self.insert(
+            &crate::utils::normalize_line_endings_to_lf(&content),
+            context,
+            EditHistoryKind::Coarse,
+        )
     }
 
     fn get_cursor_position(&self) -> anyhow::Result<Position> {
