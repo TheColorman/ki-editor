@@ -31,6 +31,10 @@ pub fn consolidate_errors<T, E: std::fmt::Debug>(
     }
 }
 
+pub(crate) fn normalize_line_endings_to_lf(content: &str) -> String {
+    content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// Distributes a total number of items into n_parts, with any remainder going to the leading parts.  
 /// Returns empty vector if n_parts is 0.  
 ///

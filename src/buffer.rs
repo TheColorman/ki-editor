@@ -1952,11 +1952,11 @@ class ObservationSpecification(Base):
     }
 
     #[test]
-    fn save_without_formatting_uses_editorconfig_end_of_line() {
+    fn save_without_formatting_ignores_editorconfig_crlf_end_of_line() {
         run_editorconfig_save_test(
             "root = true\n\n[*]\nend_of_line = crlf\n",
-            "a\nb\n",
-            "a\r\nb\r\n",
+            "a\r\nb\rc\n",
+            "a\nb\nc\n",
         );
     }
 
