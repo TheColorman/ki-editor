@@ -1,16 +1,47 @@
 use itertools::Itertools;
 
-use crate::{app::Dispatch, components::dropdown_sync::DropdownItem};
+use crate::{
+    app::{Dispatch, Dispatches},
+    components::dropdown_sync::DropdownItem,
+};
 
 use super::workspace_edit::WorkspaceEdit;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 /// Refer https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#codeAction
 pub struct CodeAction {
     pub title: String,
     pub kind: Option<String>,
     pub edit: Option<WorkspaceEdit>,
     pub command: Option<Command>,
+    pub(crate) unresolved: Option<Box<lsp_types::CodeAction>>,
+}
+
+impl Eq for CodeAction {}
+
+impl CodeAction {
+    pub fn execution_dispatches(self) -> Dispatches {
+        self.edit
+            .map(Dispatch::ApplyWorkspaceEdit)
+            .into_iter()
+            // If a code action provides an edit and a command, the edit must run first.
+            .chain(
+                self.command
+                    .map(|command| Dispatch::LspExecuteCommand { command }),
+            )
+            .collect_vec()
+            .into()
+    }
+
+    fn selection_dispatches(self) -> Dispatches {
+        match self {
+            CodeAction {
+                unresolved: Some(code_action),
+                ..
+            } => Dispatches::one(Dispatch::ResolveCodeAction(code_action)),
+            code_action => code_action.execution_dispatches(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +69,7 @@ impl From<lsp_types::Command> for CodeAction {
             kind: None,
             edit: None,
             command: Some(command.into()),
+            unresolved: None,
         }
     }
 }
@@ -52,30 +84,15 @@ impl Eq for Command {}
 
 impl From<CodeAction> for DropdownItem {
     fn from(value: CodeAction) -> DropdownItem {
-        DropdownItem::new(value.title)
-            .set_group(Some(
-                value
-                    .kind
-                    .and_then(|kind| if kind.is_empty() { None } else { Some(kind) })
-                    .unwrap_or("Misc.".to_string()),
-            ))
-            .set_dispatches(
-                value
-                    .edit
-                    .map(Dispatch::ApplyWorkspaceEdit)
-                    .into_iter()
-                    // A command this code action executes. If a code action
-                    // provides an edit and a command, first the edit is
-                    // executed and then the command.
-                    // Refer https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#codeAction
-                    .chain(
-                        value
-                            .command
-                            .map(|command| Dispatch::LspExecuteCommand { command }),
-                    )
-                    .collect_vec()
-                    .into(),
-            )
+        let title = value.title.clone();
+        let group = value
+            .kind
+            .clone()
+            .and_then(|kind| if kind.is_empty() { None } else { Some(kind) })
+            .unwrap_or("Misc.".to_string());
+        DropdownItem::new(title)
+            .set_group(Some(group))
+            .set_dispatches(value.selection_dispatches())
     }
 }
 
@@ -97,12 +114,14 @@ impl TryFrom<lsp_types::CodeAction> for CodeAction {
     fn try_from(value: lsp_types::CodeAction) -> Result<Self, Self::Error> {
         log::info!("CodeAction: {value:#?}");
 
-        let title = value.title;
+        let unresolved =
+            (value.edit.is_none() && value.data.is_some()).then(|| Box::new(value.clone()));
         Ok(CodeAction {
-            title,
+            title: value.title,
             kind: value.kind.map(|kind| kind.as_str().to_string()),
             edit: value.edit.map(WorkspaceEdit::try_from).transpose()?,
             command: value.command.map(Command),
+            unresolved,
         })
     }
 }
@@ -125,5 +144,23 @@ mod tests {
             action.command.unwrap().command(),
             "java.edit.organizeImports"
         );
+    }
+
+    #[test]
+    fn unresolved_action_is_resolved_when_selected() -> anyhow::Result<()> {
+        let protocol_action = lsp_types::CodeAction {
+            title: "using System.Text.Json;".to_string(),
+            kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+            data: Some(serde_json::json!({ "Identifier": "using System.Text.Json;" })),
+            ..Default::default()
+        };
+
+        let dropdown_item = DropdownItem::from(CodeAction::try_from(protocol_action.clone())?);
+
+        assert_eq!(
+            dropdown_item.dispatches.into_vec(),
+            vec![Dispatch::ResolveCodeAction(Box::new(protocol_action))]
+        );
+        Ok(())
     }
 }
