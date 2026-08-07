@@ -2609,6 +2609,7 @@ fn code_action() -> anyhow::Result<()> {
                 resource_operations: Vec::new(),
             }),
             command: None,
+            unresolved: None,
         };
         Box::new([
             App(OpenFile {
