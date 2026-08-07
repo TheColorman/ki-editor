@@ -855,6 +855,17 @@ impl<T: Frontend> App<T> {
                     )?;
                 }
             }
+            Dispatch::ResolveCodeAction(code_action) => {
+                if let Some(params) = self.get_request_params() {
+                    self.lsp_manager().send_message(
+                        params.path.clone(),
+                        FromEditor::CodeActionResolve {
+                            code_action,
+                            params,
+                        },
+                    )?;
+                }
+            }
             Dispatch::RequestReferences {
                 include_declaration,
                 scope,
@@ -1922,6 +1933,9 @@ impl<T: Frontend> App<T> {
             LspNotification::CodeAction(code_actions) => {
                 self.handle_dispatch(Dispatch::ReceiveCodeActions(code_actions))?;
                 Ok(())
+            }
+            LspNotification::CodeActionResolve(code_action) => {
+                self.handle_dispatches(code_action.execution_dispatches())
             }
             LspNotification::SignatureHelp(signature_help) => {
                 self.handle_signature_help(signature_help)?;
@@ -4172,6 +4186,7 @@ pub enum Dispatch {
     OpenGitBranchPrompt,
     GitCheckout(String),
     ResolveCompletionItem(lsp_types::CompletionItem),
+    ResolveCodeAction(Box<lsp_types::CodeAction>),
     OpenPipeToShellPrompt,
     SetLastNonContiguousSelectionMode(Either<SelectionMode, GlobalMode>),
     UseLastNonContiguousSelectionMode(IfCurrentNotFound),

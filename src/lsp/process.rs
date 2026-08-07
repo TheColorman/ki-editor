@@ -277,6 +277,7 @@ pub enum LspNotification {
         message: String,
     },
     CodeAction(Vec<CodeAction>),
+    CodeActionResolve(CodeAction),
     SignatureHelp(Option<SignatureHelp>),
     DocumentSymbols(Symbols),
     WorkspaceSymbols(Symbols),
@@ -381,6 +382,10 @@ pub enum FromEditor {
     },
     CompletionItemResolve {
         completion_item: Box<lsp_types::CompletionItem>,
+        params: RequestParams,
+    },
+    CodeActionResolve {
+        code_action: Box<lsp_types::CodeAction>,
         params: RequestParams,
     },
     TextDocumentPrepareCallHierarchy {
@@ -743,6 +748,10 @@ impl LspServerProcess {
                                     .map(|kind| kind.as_str().to_string())
                                     .collect(),
                                 },
+                            }),
+                            data_support: Some(true),
+                            resolve_support: Some(CodeActionCapabilityResolveSupport {
+                                properties: vec!["edit".to_string()],
                             }),
                             ..Default::default()
                         }),
@@ -1367,6 +1376,14 @@ impl LspServerProcess {
                                 ),
                             )));
                         }
+                    }
+                    "codeAction/resolve" => {
+                        let payload: <lsp_request!("codeAction/resolve") as Request>::Result =
+                            serde_json::from_value(response)?;
+
+                        self.send_to_app(AppMessage::LspNotification(Box::new(
+                            LspNotification::CodeActionResolve(payload.try_into()?),
+                        )));
                     }
                     "textDocument/signatureHelp" => {
                         let payload: <lsp_request!("textDocument/signatureHelp") as Request>::Result =
@@ -2392,6 +2409,27 @@ impl LspServerProcess {
         )
     }
 
+    fn code_action_resolve(
+        &mut self,
+        params: RequestParams,
+        code_action: lsp_types::CodeAction,
+    ) -> Result<(), anyhow::Error> {
+        if !self.has_capability(|capabilities| {
+            matches!(
+                capabilities.code_action_provider.as_ref(),
+                Some(CodeActionProviderCapability::Options(options))
+                    if options.resolve_provider.unwrap_or(false)
+            )
+        }) {
+            return Ok(());
+        }
+        self.send_request::<lsp_request!("codeAction/resolve")>(
+            params.context,
+            Some(params.path),
+            code_action,
+        )
+    }
+
     fn text_document_prepare_call_hierarchy(
         &mut self,
         params: RequestParams,
@@ -2516,6 +2554,10 @@ impl LspServerProcess {
                 completion_item,
                 params,
             } => self.completion_item_resolve(params, *completion_item),
+            FromEditor::CodeActionResolve {
+                code_action,
+                params,
+            } => self.code_action_resolve(params, *code_action),
             FromEditor::TextDocumentPrepareCallHierarchy { params, direction } => {
                 self.text_document_prepare_call_hierarchy(params, direction)
             }
