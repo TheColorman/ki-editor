@@ -544,6 +544,7 @@ mod test_language {
         run_test_case("hello.cshtml", "razor")?;
         run_test_case("hello.java", "java")?;
         run_test_case("hello.vue", "vue")?;
+        run_test_case("hello.jsonc", "json")?;
         run_test_case("justfile", "just")?;
         Ok(())
     }
