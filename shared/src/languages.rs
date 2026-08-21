@@ -848,7 +848,7 @@ fn vtsls_vue_initialization_options() -> serde_json::Value {
 
 fn json() -> Language {
     Language {
-        extensions: to_vec(&["json", "gyp"]),
+        extensions: to_vec(&["json", "jsonc", "gyp"]),
         formatter: Some(Command::new("prettierd", &[".json"])),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "json".to_string(),
