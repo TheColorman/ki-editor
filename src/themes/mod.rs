@@ -176,6 +176,7 @@ impl Theme {
             StyleKey::UiSectionDivider => {
                 Style::new().background_color(self.ui.section_divider_background)
             }
+            StyleKey::UiIndentationGuide => self.ui.indentation_guide,
             StyleKey::UiFocusedTab => self.ui.focused_tab,
             StyleKey::FocusedWindowTitle => self.ui.window_title_focused,
             StyleKey::UnfocusedWindowTitle => self.ui.window_title_unfocused,
@@ -240,6 +241,7 @@ pub struct UiStyles {
     pub secondary_selection_primary_cursor: Style,
     pub secondary_selection_secondary_cursor: Style,
     pub line_number: Style,
+    pub indentation_guide: Style,
     pub border: Style,
     pub mark: Style,
     pub primary_selection_primary_cursor: Style,

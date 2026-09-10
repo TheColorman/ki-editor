@@ -100,6 +100,7 @@ impl Editor {
                 };
                 let grid = self.get_grid_with_dimension(
                     context.theme(),
+                    Some(self.buffer().indent_settings(context).width()),
                     context.current_working_directory(),
                     context.quickfix_list_items(),
                     render_area,
@@ -181,6 +182,7 @@ impl Editor {
 
         let grid = editor.get_grid_with_dimension(
             theme,
+            None,
             context.current_working_directory(),
             &Vec::new(),
             dimension,
@@ -356,6 +358,7 @@ impl Editor {
 
                 grid.merge_vertical(self.get_grid_with_dimension(
                     context.theme(),
+                    Some(self.buffer().indent_settings(context).width()),
                     context.current_working_directory(),
                     context.quickfix_list_items(),
                     Dimension {
@@ -401,6 +404,7 @@ impl Editor {
     fn get_grid_with_dimension(
         &self,
         theme: &Theme,
+        indent_width: Option<usize>,
         working_directory: &AbsolutePath,
         quickfix_list_items: &[QuickfixListItem],
         dimension: Dimension,
@@ -475,40 +479,55 @@ impl Editor {
                 .into_iter()
                 .map(|hidden_parent_line_range| Boundary::new(&buffer, hidden_parent_line_range))
                 .collect_vec();
-            let (updates, remaining_highlight_spans): (Vec<_>, Vec<_>) = hidden_parent_lines
-                .iter()
-                .filter_map(|line| {
-                    if self.reveal.is_some() {
-                        return None;
-                    }
-                    Some(HighlightSpan {
-                        source: Source::StyleKey(StyleKey::ParentLine),
-                        range: HighlightSpanRange::Line(line.line),
-                        set_symbol: None,
-                        is_cursor: false,
-                        is_protected_range_start: false,
-                    })
+            let parent_spans = hidden_parent_lines.iter().filter_map(|line| {
+                if self.reveal.is_some() {
+                    return None;
+                }
+                Some(HighlightSpan {
+                    source: Source::StyleKey(StyleKey::ParentLine),
+                    range: HighlightSpanRange::Line(line.line),
+                    set_symbol: None,
+                    is_cursor: false,
+                    is_protected_range_start: false,
                 })
-                .chain(highlight_spans)
-                .map(|span| span.into_cell_updates(&buffer, theme, &boundaries))
-                .unzip();
-            let updates = updates.into_iter().flatten().collect_vec();
-            let remaining_highlight_spans = remaining_highlight_spans
-                .into_iter()
-                .flatten()
-                .collect_vec();
+            });
+            let [base_spans, overlay_spans] = highlight_spans;
+            let [base, overlay] = [parent_spans.chain(base_spans).collect_vec(), overlay_spans]
+                .map(|spans| {
+                    let (updates, remaining): (Vec<_>, Vec<_>) = spans
+                        .into_iter()
+                        .map(|span| span.into_cell_updates(&buffer, theme, &boundaries))
+                        .unzip();
+                    (
+                        updates.into_iter().flatten().collect_vec(),
+                        remaining.into_iter().flatten().collect_vec(),
+                    )
+                });
+            let (base_updates, base_remaining) = base;
+            let (overlay_updates, overlay_remaining) = overlay;
             let grid = hidden_parent_lines.into_iter().fold(
                 Grid::new(Dimension { height: 0, width }),
                 |grid, line| {
-                    let updates = updates
+                    let guides = indent_width.into_iter().flat_map(|indent_width| {
+                        indentation_guide_updates(
+                            &buffer,
+                            line.line..line.line + 1,
+                            indent_width,
+                            theme,
+                        )
+                    });
+                    let updates = base_updates
                         .iter()
-                        .filter_map(|update| {
-                            if update.position.line == line.line {
-                                Some(update.clone().set_position_line(0))
-                            } else {
-                                None
-                            }
-                        })
+                        .filter(|update| update.position.line == line.line)
+                        .cloned()
+                        .chain(guides)
+                        .chain(
+                            overlay_updates
+                                .iter()
+                                .filter(|update| update.position.line == line.line)
+                                .cloned(),
+                        )
+                        .map(|update| update.set_position_line(0))
                         .collect_vec();
                     grid.merge_vertical(Grid::new(Dimension { height: 1, width }).render_content(
                         &line.content,
@@ -528,15 +547,27 @@ impl Editor {
                     ))
                 },
             );
-            (grid, remaining_highlight_spans)
+            (grid, [base_remaining, overlay_remaining])
         };
 
         let grid = {
             let visible_lines_updates = {
                 let boundaries = [Boundary::new(&buffer, visible_line_range.clone())];
-                remaining_highlight_spans
-                    .into_iter()
-                    .flat_map(|span| span.into_cell_updates(&buffer, theme, &boundaries).0)
+                let [base, overlay] = remaining_highlight_spans.map(|spans| {
+                    spans
+                        .into_iter()
+                        .flat_map(|span| span.into_cell_updates(&buffer, theme, &boundaries).0)
+                });
+                let guides = indent_width.into_iter().flat_map(|indent_width| {
+                    indentation_guide_updates(
+                        &buffer,
+                        visible_line_range.clone(),
+                        indent_width,
+                        theme,
+                    )
+                });
+                base.chain(guides)
+                    .chain(overlay)
                     // Insert the primary cursor cell update by force.
                     // This is necessary because when the content is empty
                     // all cell updates will be excluded when `to_cell_updates` is run,
@@ -640,7 +671,9 @@ impl Editor {
                                 .and_then(|cell| cell.source.as_ref());
                             let can_update = matches!(
                                 source,
-                                None | Some(StyleKey::Default) | Some(StyleKey::Syntax(_))
+                                None | Some(StyleKey::Default)
+                                    | Some(StyleKey::Syntax(_))
+                                    | Some(StyleKey::UiIndentationGuide)
                             );
                             if can_update {
                                 jj_conflict_updates.push(CellUpdate {
@@ -732,7 +765,7 @@ impl Editor {
         is_focused_file: bool,
         show_cursors: bool,
         reveal: &Option<Reveal>,
-    ) -> Vec<HighlightSpan> {
+    ) -> [Vec<HighlightSpan>; 2] {
         use StyleKey::*;
         let buffer = self.buffer();
 
@@ -1121,11 +1154,12 @@ impl Editor {
         //
         // Highlight spans with higher precedence will overwrite
         // highlight spans with lower precedence.
-        vec![]
-            .into_iter()
-            .chain(visible_parent_lines)
+        // Guides are inserted as cell updates between these two layers, avoiding
+        // per-guide span splitting and character-index-to-position conversions.
+        let base = visible_parent_lines
             .chain(filtered_highlighted_spans)
-            .chain(possible_selections)
+            .collect_vec();
+        let overlay = possible_selections
             .chain(primary_selection_highlight_span)
             .chain(secondary_selections_highlight_spans)
             .chain(primary_selection_anchors)
@@ -1140,7 +1174,8 @@ impl Editor {
             .chain(regex_highlight_rules)
             .chain(extra_decorations)
             .chain(incremental_search_matches)
-            .collect_vec()
+            .collect_vec();
+        [base, overlay]
     }
 
     pub fn possible_selections_in_line_number_range(
@@ -1192,6 +1227,38 @@ impl Editor {
             cursor_direction: &self.cursor_direction,
         })
     }
+}
+
+fn indentation_guide_updates(
+    buffer: &Buffer,
+    line_range: Range<usize>,
+    indent_width: usize,
+    theme: &Theme,
+) -> Vec<CellUpdate> {
+    let indent_width = indent_width.max(1);
+    let style = theme.get_style(&StyleKey::UiIndentationGuide);
+    line_range
+        .filter_map(|line_index| {
+            let line = buffer.rope().get_line(line_index)?;
+            let leading_whitespace_count = line
+                .chars()
+                .take_while(|character| matches!(character, ' ' | '\t'))
+                .count();
+            let complete_indentation_width = leading_whitespace_count / indent_width * indent_width;
+            Some(
+                (0..complete_indentation_width)
+                    .step_by(indent_width)
+                    .map(move |column| CellUpdate {
+                        source: Some(StyleKey::UiIndentationGuide),
+                        position: Position::new(line_index, column),
+                        symbol: Some('│'),
+                        style,
+                        ..Default::default()
+                    }),
+            )
+        })
+        .flatten()
+        .collect()
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -1459,12 +1526,104 @@ mod test_render_editor {
     use quickcheck::Arbitrary;
     use quickcheck_macros::quickcheck;
 
+    use super::indentation_guide_updates;
     use crate::{
+        buffer::Buffer,
         components::{component::Component, editor::Editor},
         context::Context,
         position::Position,
         rectangle::Rectangle,
     };
+
+    #[test]
+    fn indentation_guides_are_added_for_complete_indentation_levels() {
+        let buffer = Buffer::new(
+            None,
+            "root\n    child\n        grandchild\n  partial\n    \n",
+        );
+
+        let positions = indentation_guide_updates(&buffer, 1..5, 4, Context::default().theme())
+            .into_iter()
+            .map(|update| update.position)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            positions,
+            [
+                Position::new(1, 0),
+                Position::new(2, 0),
+                Position::new(2, 4),
+                Position::new(4, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn indentation_guides_support_tabs() {
+        let buffer = Buffer::new(None, "\tparent\n\t\tchild\n");
+
+        let positions = indentation_guide_updates(&buffer, 0..2, 1, Context::default().theme())
+            .into_iter()
+            .map(|update| update.position)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            positions,
+            [
+                Position::new(0, 0),
+                Position::new(1, 0),
+                Position::new(1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    #[ignore = "manual release-mode rendering benchmark"]
+    fn benchmark_indented_rendering() {
+        use crate::app::Dimension;
+        use std::{hint::black_box, time::Instant};
+
+        let context = Context::default();
+        for (lines, indentation) in [(40, 16), (40, 4096), (100_000, 16)] {
+            let content = format!("{}text\n", " ".repeat(indentation)).repeat(lines);
+            let editor = Editor::from_text(None, &content);
+            for indent_width in [None, Some(4)] {
+                let render = || {
+                    black_box(editor.get_grid_with_dimension(
+                        context.theme(),
+                        indent_width,
+                        context.current_working_directory(),
+                        &[],
+                        Dimension {
+                            height: 40,
+                            width: 100,
+                        },
+                        lines.saturating_sub(40),
+                        None,
+                        false,
+                        true,
+                        false,
+                        &[],
+                        &[],
+                        false,
+                        None,
+                        &None,
+                    ));
+                };
+                for _ in 0..5 {
+                    render();
+                }
+                let start = Instant::now();
+                for _ in 0..100 {
+                    render();
+                }
+                eprintln!(
+                    "lines={lines} indentation={indentation} guides={indent_width:?}: {:?}/frame",
+                    start.elapsed() / 100
+                );
+            }
+        }
+    }
 
     impl Arbitrary for Rectangle {
         fn arbitrary(g: &mut quickcheck::Gen) -> Self {
