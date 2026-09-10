@@ -2379,8 +2379,8 @@ fn main() {
 4│  let y = 2; //
 ↪│too long, wrapped
 5│  for a in b {
-6│    let z = 4;
-7│    █rint()
+6││   let z = 4;
+7││   █rint()
 "
                 .trim(),
             )),
@@ -2431,8 +2431,8 @@ fn main() {
 4│  let y = 2; //
 ↪│too long, wrapped
 5│  for a in b {
-6│    let z = 4;
-7│    █rint()"
+6││   let z = 4;
+7││   █rint()"
                     .trim(),
             )),
             // Expect the marks of outbound parent lines are rendered properly
@@ -2850,6 +2850,45 @@ fn main() { // too long
                     .map(|position| ExpectKind::GridCellStyleKey(position, Some(StyleKey::UiMark)))
                     .collect(),
             ),
+        ])
+    })
+}
+
+#[test]
+fn render_indentation_guides() -> anyhow::Result<()> {
+    execute_test(|s| {
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent(
+                "root\n    child\n        grandchild\n  partial".to_string(),
+            )),
+            Editor(SetRectangle(Rectangle {
+                origin: Position::default(),
+                width: 30,
+                height: 5,
+            })),
+            Expect(EditorGrid(
+                "
+[:] 🦀  main.rs
+1│█oot
+2││   child
+3││   │   grandchild
+4│  partial
+"
+                .trim(),
+            )),
+            Expect(GridCellStyleKey(
+                Position::new(2, 2),
+                Some(StyleKey::UiPrimarySelectionAnchors),
+            )),
+            Expect(GridCellStyleKey(
+                Position::new(3, 6),
+                Some(StyleKey::UiIndentationGuide),
+            )),
         ])
     })
 }
@@ -4915,7 +4954,7 @@ fn main() {
                 "
 [:] 🦀  main.rs
 1│fn main() {
-3│        █ar();
+3││   │   █ar();
 "
                 .trim(),
             )),
@@ -4982,8 +5021,8 @@ fn foo() {
                 "[:] 🦀  main.rs
 1│fn foo() {
 2│  fn bar() {
-5│        █yy();
-6│    }"
+5││   │   █yy();
+6││   }"
                     .trim(),
             )),
         ])
@@ -5887,9 +5926,9 @@ fn main() {
  9│  // padding y
 10│  // padding z
 11│  █oo { // this line should be at top
-12│    x: 2
-13│    // padding x
-14│    // padding y
+12││   x: 2
+13││   // padding x
+14││   // padding y
  [Global Title]"
                     .to_string(),
             )),
@@ -5898,11 +5937,11 @@ fn main() {
                 " [:] 🦀  main.rs
  6│fn main() {
 11│  █oo { // this line should be at top
-12│    x: 2
-13│    // padding x
-14│    // padding y
-15│    // padding z
-16│    // padding z
+12││   x: 2
+13││   // padding x
+14││   // padding y
+15││   // padding z
+16││   // padding z
  [Global Title]"
                     .to_string(),
             )),
@@ -5959,7 +5998,7 @@ fn main() {
  6│fn main() {
  7│  this_is_a_long_line_for_testing_wrapping();
  8│  █oo {
- 9│    x: 2
+ 9││   x: 2
 10│  } // this line should be at bottom
  [Global Title]",
     )?;
@@ -5971,7 +6010,7 @@ fn main() {
         " [:] 🦀  main.rs
  6│fn main() {
  8│  █oo {
- 9│    x: 2
+ 9││   x: 2
 10│  } // this line should be
  ↪│ at bottom
  [Global Title]",
@@ -6027,7 +6066,7 @@ fn main() {
  6│fn main() {
  7│  this_is_a_long_line_for_testing_wrapping();
  8│  █oo {
- 9│    x: 2 // this line should be at center
+ 9││   x: 2 // this line should be at center
 10│  }
 11│}
 12│// padding 4
@@ -6041,7 +6080,7 @@ fn main() {
         " [:] 🦀  main.rs
  6│fn main() {
  8│  █oo {
- 9│    x: 2 // this line
+ 9││   x: 2 // this line
  ↪│should be at center
 10│  }
  [Global Title]",
@@ -6056,7 +6095,7 @@ fn main() {
         " [:] 🦀  main.rs
  6│fn main() {
  8│  █oo {
- 9│    x: 2 // this line should be at center
+ 9││   x: 2 // this line should be at center
  [Global Title]",
     )?;
 
@@ -6238,7 +6277,7 @@ fn git_hunk_gutter() -> anyhow::Result<()> {
 2│alpha
 3│
 4│fn () {
-5│    █oo::foo();
+5││   █oo::foo();
 6│}
 7│"#,
             )),

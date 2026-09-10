@@ -63,6 +63,7 @@ pub fn vscode_light() -> Theme {
                 .background_color(hex!("#808080"))
                 .foreground_color(hex!("#ffffff")),
             line_number: Style::new().foreground_color(hex!("#6a9955")),
+            indentation_guide: Style::new().foreground_color(hex!("#d3d3d3")),
             border: Style::new()
                 .foreground_color(hex!("#aaaaaa"))
                 .background_color(hex!("#ffffff")),

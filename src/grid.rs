@@ -695,6 +695,7 @@ pub enum StyleKey {
     UiSecondarySelectionPrimaryCursor,
     UiSecondarySelectionSecondaryCursor,
     UiSectionDivider,
+    UiIndentationGuide,
     UiFocusedTab,
     UiCursorLineNumber,
     UiPrimarySelectionPrimaryCursor,

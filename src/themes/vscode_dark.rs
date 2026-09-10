@@ -63,6 +63,7 @@ pub fn vscode_dark() -> Theme {
                 .background_color(hex!("#808080"))
                 .foreground_color(hex!("#ffffff")),
             line_number: Style::new().foreground_color(hex!("#858585")),
+            indentation_guide: Style::new().foreground_color(hex!("#404040")),
             border: Style::new()
                 .background_color(hex!("#1E1E1E"))
                 .foreground_color(hex!("#858585")),

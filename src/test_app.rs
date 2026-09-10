@@ -4398,9 +4398,9 @@ fn marking_selections_should_refresh_mark_quickfix() -> Result<(), anyhow::Error
 
 Quickfix list
 1│.gitignore
-2│    1:1  foo
-3│    3:1  spam
-4│    4:1  baz"
+2││   1:1  foo
+3││   3:1  spam
+4││   4:1  baz"
                     .to_string(),
             )),
             Expect(ExpectKind::QuickfixListContent(
