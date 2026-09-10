@@ -228,6 +228,10 @@ pub(super) fn from_theme_content(theme: ThemeContent) -> Theme {
             secondary_selection_secondary_cursor: secondary_cursor,
             line_number: Style::new()
                 .set_some_foreground_color(from_some_hex(&theme.style.editor_line_number)),
+            indentation_guide: Style::new().set_some_foreground_color(
+                from_some_hex(&theme.style.editor_wrap_guide)
+                    .or_else(|| from_some_hex(&theme.style.editor_line_number)),
+            ),
             border: Style::new()
                 .foreground_color(from_some_hex(&theme.style.border).unwrap_or(text_color))
                 .background_color_or_transparent(background),

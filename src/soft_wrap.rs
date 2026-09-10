@@ -77,10 +77,7 @@ impl WrappedLines {
             .get_positions(position.column, self.width)
             .ok_or(CalibrationError::ColumnOutOfRange)?;
 
-        let vertical_offset = {
-            let previous_lines = self.lines.iter().take(position.line);
-            previous_lines.map(|line| line.count()).sum::<usize>()
-        };
+        let vertical_offset = baseline.vertical_offset;
 
         let width = self.width;
 
@@ -110,9 +107,9 @@ pub struct WrappedLine {
     line_number: usize,
     primary: String,
     wrapped: Vec<String>,
-    /// This can be computed on demand, but it is stored as cache to
-    /// greatly improve the performace of `WrappedLines::calibrate`
-    chars_with_line_index: Vec<(usize /* line index (0-based) */, char)>,
+    vertical_offset: usize,
+    /// Display position and width of each character, plus the end-of-line cursor.
+    char_positions: Vec<(Position, usize)>,
 }
 impl Display for WrappedLine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -132,32 +129,12 @@ impl WrappedLine {
     }
 
     fn get_positions(&self, column: usize, width: usize) -> Option<Positions> {
-        let chars_with_line_index = &self.chars_with_line_index;
-        if chars_with_line_index.is_empty() && column == 0 {
-            return Some(Positions::single(Position::default()));
-        }
-        if column > chars_with_line_index.len() {
-            return None;
-        }
-        let (left, right) = chars_with_line_index.split_at(column);
-        let line = right
-            .split_first()
-            .map(|((line, _), _)| *line)
-            .or_else(|| Some(chars_with_line_index.last()?.0))?;
-        let previous_columns_chars = left.iter().filter(|(line_, _)| &line == line_);
-
-        let char_width = right
-            .first()
-            .map(|(_, char)| get_char_width(*char))
-            .unwrap_or(1);
-        let previous_columns_chars_total_width: usize = previous_columns_chars
-            .map(move |(_, char)| get_char_width(*char))
-            .sum();
+        let &(position, char_width) = self.char_positions.get(column)?;
         Some(Positions(Box::new((0..char_width).map(move |column| {
-            let calibrated_column = column + previous_columns_chars_total_width;
+            let calibrated_column = column + position.column;
             debug_assert!(calibrated_column <= width);
             Position {
-                line,
+                line: position.line,
                 column: calibrated_column,
             }
         }))))
@@ -226,6 +203,7 @@ pub fn soft_wrap(text: &str, width: usize) -> WrappedLines {
     // Need to reduce the width by 1 for wrapping,
     // that one space is reserved for rendering cursor at the last column
     let wrap_width = width.saturating_sub(1);
+    let mut vertical_offset = 0;
     let lines = ropey::Rope::from_str(text)
         .lines()
         .enumerate()
@@ -238,17 +216,26 @@ pub fn soft_wrap(text: &str, width: usize) -> WrappedLines {
                 .collect_vec();
             let wrapped_lines: Vec<String> = wrap_items(items, wrap_width);
             let (primary, wrapped) = wrapped_lines.split_first()?;
+            let mut char_positions = Vec::new();
+            let mut end_position = Position::default();
+            for (line_index, line) in wrapped_lines.iter().enumerate() {
+                let mut column = 0;
+                for character in line.chars() {
+                    let char_width = get_char_width(character);
+                    char_positions.push((Position::new(line_index, column), char_width));
+                    column += char_width;
+                    end_position = Position::new(line_index, column);
+                }
+            }
+            char_positions.push((end_position, 1));
+            let line_vertical_offset = vertical_offset;
+            vertical_offset += wrapped_lines.len();
             Some(WrappedLine {
                 primary: primary.to_string(),
                 line_number,
                 wrapped: wrapped.to_vec(),
-                chars_with_line_index: wrapped_lines
-                    .into_iter()
-                    .enumerate()
-                    .flat_map(|(line_index, line)| {
-                        line.chars().map(|char| (line_index, char)).collect_vec()
-                    })
-                    .collect_vec(),
+                vertical_offset: line_vertical_offset,
+                char_positions,
             })
         })
         .collect();
@@ -436,6 +423,51 @@ mod test_soft_wrap {
 
         use crate::position::Position;
         use crate::soft_wrap::soft_wrap;
+
+        #[test]
+        fn cached_positions_match_wrapped_character_widths() {
+            use crate::grid::get_char_width;
+
+            for width in [5, 10, 80] {
+                let content = format!("{}\n\t界e\u{301} words\n\nlast\n", " ".repeat(4096));
+                let wrapped = soft_wrap(&content, width);
+                let mut vertical_offset = 0;
+                for (line_index, line) in wrapped.lines().iter().enumerate() {
+                    let mut char_index = 0;
+                    let mut end = Position::new(vertical_offset, 0);
+                    for (row, text) in line.lines().iter().enumerate() {
+                        let mut column = 0;
+                        for character in text.chars() {
+                            let char_width = get_char_width(character);
+                            let expected = (0..char_width)
+                                .map(|offset| Position::new(vertical_offset + row, column + offset))
+                                .collect::<Vec<_>>();
+                            assert_eq!(
+                                wrapped
+                                    .calibrate(Position::new(line_index, char_index))
+                                    .unwrap()
+                                    .into_vec(),
+                                expected
+                            );
+                            column += char_width;
+                            char_index += 1;
+                            end = Position::new(vertical_offset + row, column);
+                        }
+                    }
+                    assert_eq!(
+                        wrapped
+                            .calibrate(Position::new(line_index, char_index))
+                            .unwrap()
+                            .into_vec(),
+                        vec![end]
+                    );
+                    assert!(wrapped
+                        .calibrate(Position::new(line_index, char_index + 1))
+                        .is_err());
+                    vertical_offset += line.count();
+                }
+            }
+        }
 
         #[test]
         fn multi_width_unicode_should_be_padded() {
