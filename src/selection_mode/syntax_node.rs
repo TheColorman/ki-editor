@@ -39,7 +39,7 @@ impl IterBasedSelectionMode for SyntaxNode {
         };
         let ranges = vector
             .into_iter()
-            .map(|node| ByteRange::new(node.byte_range()))
+            .map(|node| ByteRange::new(buffer.node_selection_range(node)))
             .collect_vec();
         Ok(Box::new(ranges.into_iter()))
     }
@@ -124,7 +124,7 @@ impl IterBasedSelectionMode for SyntaxNode {
             let ranges = {
                 (0..parent.named_child_count())
                     .filter_map(move |i| parent.named_child(i))
-                    .map(|node| ByteRange::new(node.byte_range()))
+                    .map(|node| ByteRange::new(buffer.node_selection_range(node)))
                     .collect_vec()
             };
             Ok(Box::new(ranges.into_iter()))
@@ -155,7 +155,7 @@ impl IterBasedSelectionMode for SyntaxNode {
             let ranges = {
                 (0..parent.child_count())
                     .filter_map(move |i| parent.child(i))
-                    .map(|node| ByteRange::new(node.byte_range()))
+                    .map(|node| ByteRange::new(buffer.node_selection_range(node)))
                     .collect_vec()
             };
             Ok(Box::new(ranges.into_iter()))
@@ -191,7 +191,7 @@ impl SyntaxNode {
             (false, Direction::End) => node.next_sibling(),
         };
         Ok(node.and_then(|node| {
-            ByteRange::new(node.byte_range())
+            ByteRange::new(buffer.node_selection_range(node))
                 .to_selection(params.buffer, params.current_selection)
                 .ok()
         }))
@@ -214,13 +214,18 @@ impl SyntaxNode {
         else {
             return Ok(None);
         };
+        let selection_end = params
+            .buffer
+            .char_to_byte(params.current_selection.range().end)?;
         while let Some(some_node) = get_node(node, go_up, self.coarse) {
             // This is necessary because sometimes the parent node can have the same range as
             // the current node
-            if some_node.range() != node.range() {
+            let range = params.buffer.node_selection_range(some_node);
+            if range != params.buffer.node_selection_range(node)
+                && (!go_up || range.end >= selection_end)
+            {
                 return Ok(Some(ApplyMovementResult::from_selection(
-                    ByteRange::new(some_node.byte_range())
-                        .to_selection(params.buffer, params.current_selection)?,
+                    ByteRange::new(range).to_selection(params.buffer, params.current_selection)?,
                 )));
             }
             node = some_node;
@@ -234,7 +239,7 @@ impl SyntaxNode {
                 )? {
                     if let Some(parent) = host_node.parent() {
                         return Ok(Some(ApplyMovementResult::from_selection(
-                            ByteRange::new(parent.byte_range())
+                            ByteRange::new(params.buffer.node_selection_range(parent))
                                 .to_selection(params.buffer, params.current_selection)?,
                         )));
                     }
@@ -275,6 +280,182 @@ mod test_syntax_node {
         let mut buffer = Buffer::new(language.tree_sitter_language(), source);
         buffer.set_language(language).unwrap();
         buffer
+    }
+
+    #[test]
+    fn yaml_trailing_comments() -> anyhow::Result<()> {
+        let language = crate::config::from_extension("yaml").unwrap();
+        for (value, suffix) in [
+            ("enabled: true", "\n  # following section\n"),
+            ("enabled: true # inline", "\n  # following section\n"),
+            (
+                "names:\n      - default # required\n      - shard2",
+                "\n\n  # Praefect\n  # URL\n",
+            ),
+            (
+                "enabled: true\n    internal:\n      names:\n        - default # required\n        - shard2",
+                "\n\n  # Praefect is the clustered version of Gitaly\n  # See:\n  # https://gitlab.com/groups/gitlab-org/-/work_items/6127\n",
+            ),
+            (
+                "names:\n      - default\n      # internal\n      - shard2 # inline",
+                "\n      # closing note\n",
+            ),
+            ("name: \"# not a comment\"", "\n  # following\n"),
+            ("name: |\n      # scalar content", "\n  # following\n"),
+            ("name: >-\n      # scalar content", "\n  # following\n"),
+            (
+                "enabled: true\n# less indented\n    internal: false",
+                "\n  # following\n",
+            ),
+            ("name: \"\u{e9}\" # inline", "\n  # following\n"),
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let expected = format!("gitaly:\n    {value}").replace('\n', newline);
+                let source = format!(
+                    "root:\n  first: true\n  {expected}{suffix}  praefect:\n    enabled: false\n"
+                )
+                .replace("\r\n", "\n")
+                .replace('\n', newline);
+                let buffer = Buffer::new(language.tree_sitter_language(), &source);
+                assert!(!buffer.tree().unwrap().root_node().has_error(), "{source}");
+                let start = buffer.byte_to_char(source.find("gitaly").unwrap())?;
+                let selection = Selection::new((start..start).into());
+                let params = SelectionModeParams {
+                    buffer: &buffer,
+                    current_selection: &selection,
+                    cursor_direction: &Direction::Start,
+                };
+                let selected = super::SyntaxNode { coarse: true }
+                    .current(&params, IfCurrentNotFound::LookForward)?
+                    .unwrap();
+                assert_eq!(
+                    buffer.slice(&selected.range())?.to_string(),
+                    expected,
+                    "{source}"
+                );
+                let tree = buffer.tree().unwrap();
+                let node = buffer
+                    .get_current_node_in_tree(tree, &selected, false)?
+                    .unwrap();
+                assert_eq!(node.kind(), "block_mapping_pair");
+                assert_eq!(
+                    buffer.node_selection_range(node),
+                    source.find("gitaly").unwrap()..source.find("gitaly").unwrap() + expected.len()
+                );
+                assert!(node.end_byte() > buffer.node_selection_range(node).end);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn yaml_trimmed_node_navigation() -> anyhow::Result<()> {
+        let source = "root:\n  first: true\n  gitaly:\n    names:\n      - default\n      - shard2\n\n  # Praefect\n  # URL\n  praefect:\n    enabled: false\n";
+        let language = crate::config::from_extension("yaml").unwrap();
+        let buffer = Buffer::new(language.tree_sitter_language(), source);
+        let mode = super::SyntaxNode { coarse: true };
+        let gitaly_start = source.find("gitaly").unwrap();
+        let selection = Selection::new((CharIndex(gitaly_start)..CharIndex(gitaly_start)).into());
+        let params = |selection| SelectionModeParams {
+            buffer: &buffer,
+            current_selection: selection,
+            cursor_direction: &Direction::Start,
+        };
+        let selected = mode
+            .current(&params(&selection), IfCurrentNotFound::LookForward)?
+            .unwrap();
+        let next = mode.right(&params(&selected))?.unwrap();
+        assert_eq!(
+            buffer.slice(&next.range())?.to_string(),
+            "praefect:\n    enabled: false\n"
+        );
+        assert_eq!(
+            mode.left(&params(&next))?.unwrap().range(),
+            selected.range()
+        );
+        let child = mode.down(&params(&selected), None)?.unwrap().selection;
+        assert_eq!(buffer.slice(&child.range())?.to_string(), "gitaly");
+        assert_eq!(
+            mode.expand(&params(&child))?.unwrap().selection.range(),
+            selected.range()
+        );
+        let parent = mode.expand(&params(&selected))?.unwrap().selection;
+        assert!(parent.range().end > selected.range().end);
+        let ranges = mode
+            .all_meaningful_selections(&params(&selected))?
+            .collect_vec();
+        assert!(ranges.contains(&ByteRange::new(
+            gitaly_start..source.find("shard2").unwrap() + 6
+        )));
+
+        let start = source.find("# Praefect").unwrap();
+        let comment = Selection::new((CharIndex(start)..CharIndex(start + 10)).into());
+        let node = buffer
+            .get_current_node_in_tree(buffer.tree().unwrap(), &comment, false)?
+            .unwrap();
+        assert_eq!(node.kind(), "comment");
+        assert_eq!(buffer.node_selection_range(node), node.byte_range());
+        if let Some(parent) = mode.expand(&params(&comment))? {
+            assert!(parent.selection.range().end >= comment.range().end);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn yaml_trailing_comments_at_eof() -> anyhow::Result<()> {
+        let language = crate::config::from_extension("yaml").unwrap();
+        let source = "gitaly:\n  enabled: true\n# trailing";
+        let buffer = Buffer::new(language.tree_sitter_language(), source);
+        let selection = Selection::default();
+        let params = SelectionModeParams {
+            buffer: &buffer,
+            current_selection: &selection,
+            cursor_direction: &Direction::Start,
+        };
+        let selected = super::SyntaxNode { coarse: true }
+            .current(&params, IfCurrentNotFound::LookForward)?
+            .unwrap();
+        assert_eq!(
+            buffer.slice(&selected.range())?.to_string(),
+            "gitaly:\n  enabled: true"
+        );
+        Ok(())
+    }
+
+    #[serial]
+    #[test]
+    fn yaml_copy_delete_leaves_following_comments() -> anyhow::Result<()> {
+        execute_test(|s| {
+            let path = s.new_path("selection.yaml");
+            std::fs::write(&path, "").unwrap();
+            Box::new([
+                App(OpenFile {
+                    path: path.try_into().unwrap(),
+                    owner: BufferOwner::User,
+                    focus: true,
+                }),
+                Editor(SetContent(
+                    "first: true\ngitaly:\n  names:\n    - shard2\n\n# Praefect\npraefect: false"
+                        .to_string(),
+                )),
+                Editor(MatchLiteral("gitaly".to_string())),
+                Editor(SetSelectionMode(
+                    IfCurrentNotFound::LookForward,
+                    SelectionMode::SyntaxNode,
+                )),
+                Expect(CurrentSelectedTexts(&["gitaly:\n  names:\n    - shard2"])),
+                Editor(Copy),
+                Editor(DeleteOne),
+                Expect(CurrentComponentContent(
+                    "first: true\n\n\n# Praefect\npraefect: false",
+                )),
+                Editor(MatchLiteral("praefect: false".to_string())),
+                Editor(ReplaceWithCopiedText { cut: false }),
+                Expect(CurrentComponentContent(
+                    "first: true\n\n\n# Praefect\ngitaly:\n  names:\n    - shard2",
+                )),
+            ])
+        })
     }
 
     fn select_current_syntax_node_text(source: &str, cursor_text: &str) -> String {

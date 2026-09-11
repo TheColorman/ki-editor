@@ -23,11 +23,12 @@ impl IterBasedSelectionMode for TopNode {
                 .into_iter()
                 .map(|(_, group)| {
                     ByteRange::new(
-                        group
-                            .into_iter()
-                            .max_by_key(|node| node.byte_range().end)
-                            .unwrap()
-                            .byte_range(),
+                        buffer.node_selection_range(
+                            group
+                                .into_iter()
+                                .max_by_key(|node| node.byte_range().end)
+                                .unwrap(),
+                        ),
                     )
                 })
                 .collect_vec();
