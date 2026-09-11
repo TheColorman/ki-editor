@@ -1091,6 +1091,53 @@ impl Buffer {
         })
     }
 
+    pub(crate) fn node_selection_range(&self, node: Node<'_>) -> Range<usize> {
+        static YAML: std::sync::LazyLock<tree_sitter::Language> = std::sync::LazyLock::new(|| {
+            crate::config::from_extension("yaml")
+                .unwrap()
+                .tree_sitter_language()
+                .unwrap()
+        });
+        let mut range = node.byte_range();
+        if *node.language() != *YAML || node.has_error() || node.kind() == "comment" {
+            return range;
+        }
+
+        // YAML can attach following standalone comments inside the final nested block.
+        // Walk only the trailing branch, treating scalar contents as indivisible.
+        let mut cursor = node.walk();
+        let mut trimmed = false;
+        loop {
+            let current = cursor.node();
+            if current.kind() == "comment" {
+                let line_start = self.rope.line_to_char(current.start_position().row);
+                let comment_start = self.rope.byte_to_char(current.start_byte());
+                if self
+                    .rope
+                    .slice(line_start..comment_start)
+                    .chars()
+                    .all(|c| c == ' ' || c == '\t')
+                {
+                    trimmed = true;
+                    while !cursor.goto_previous_sibling() {
+                        if !cursor.goto_parent() {
+                            return range;
+                        }
+                    }
+                    continue;
+                }
+            } else if !matches!(current.kind(), "block_scalar" | "flow_node")
+                && cursor.goto_last_child()
+            {
+                continue;
+            }
+            if trimmed {
+                range.end = current.end_byte();
+            }
+            return range;
+        }
+    }
+
     pub(crate) fn get_current_node_in_tree<'a>(
         &'a self,
         tree: &'a Tree,
@@ -1114,7 +1161,9 @@ impl Buffer {
         while let Some(parent) = result.parent() {
             if parent.start_byte() == node.start_byte()
                 && root_node_id != parent.id()
-                && (get_largest_end || node.end_byte() == parent.end_byte())
+                && (get_largest_end
+                    || self.node_selection_range(node) == self.node_selection_range(parent))
+                && self.node_selection_range(parent).end >= end
             {
                 result = parent;
             } else {
