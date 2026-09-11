@@ -19,8 +19,8 @@ impl IterBasedSelectionMode for TopNode {
                     .filter_map(|(_, group)| {
                         group
                             .into_iter()
-                            .map(|node| node.byte_range())
-                            .max_by_key(|range| range.end)
+                            .max_by_key(|node| node.end_byte())
+                            .map(|node| buffer.node_selection_range(node))
                     })
                     .collect_vec()
             })?
