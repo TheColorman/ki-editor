@@ -887,7 +887,7 @@ impl Buffer {
             .as_ref()
             .and_then(|language| language.formatter())?;
 
-        match formatter.format(&self.rope.to_string()) {
+        match formatter.format(&self.rope.to_string(), self.path.as_ref()?.as_ref()) {
             Ok(content) => Some(Ok(content)),
             Err(error) => {
                 log::info!("Error formatting: {error}");
@@ -2017,6 +2017,41 @@ class ObservationSpecification(Base):
         };
 
         use super::run_test;
+
+        #[test]
+        #[ignore = "requires prettierd on PATH"]
+        fn vue_formatter_uses_nested_config_and_actual_filename() -> anyhow::Result<()> {
+            for prettier_config in [
+                None,
+                Some(
+                    r#"{"useTabs":false,"overrides":[{"files":"Component.vue","options":{"useTabs":true}}]}"#,
+                ),
+            ] {
+                let dir = tempfile::tempdir()?;
+                let frontend = dir.path().join("frontends");
+                let app = frontend.join("apps/app with spaces");
+                std::fs::create_dir_all(&app)?;
+                std::fs::write(
+                    frontend.join(".editorconfig"),
+                    "root = true\n[*]\nindent_style = tab\n",
+                )?;
+                if let Some(config) = prettier_config {
+                    std::fs::write(frontend.join(".prettierrc"), config)?;
+                }
+                let file_path = app.join("Component.vue");
+                std::fs::write(&file_path, "<template>\n<div>Hello</div>\n</template>")?;
+                let path = shared::absolute_path::AbsolutePath::try_from(file_path)?;
+                let mut buffer = super::Buffer::from_path(&path, true)?;
+                let expected = "<template>\n\t<div>Hello</div>\n</template>\n";
+
+                // Ki's CWD is outside this project; configuration must follow the buffer path.
+                assert_eq!(buffer.get_formatted_content().unwrap()?, expected);
+                buffer.save(&Context::default(), SelectionSet::default(), true, 0)?;
+                assert_eq!(path.read()?, expected);
+                assert_eq!(buffer.rope.to_string(), expected);
+            }
+            Ok(())
+        }
 
         #[test]
         fn should_format_code() {

@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{io::Write, path::Path};
 
 use crate::language::ProcessCommand;
 
@@ -15,12 +15,26 @@ impl From<ProcessCommand> for Formatter {
 }
 
 impl Formatter {
-    pub fn format(&self, content: &str) -> anyhow::Result<String> {
+    pub fn format(&self, content: &str, file_path: &Path) -> anyhow::Result<String> {
         // Run the command with the args,
         // pass in the content using stdin,
         // get the output from the stdout
 
-        let mut child = self.process_command.spawn()?;
+        let file_path = file_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Formatter file path is not valid UTF-8"))?;
+        let arguments = self
+            .process_command
+            .arguments()
+            .iter()
+            .map(|argument| argument.replace("{file_path}", file_path))
+            .collect::<Vec<_>>();
+        let mut child = ProcessCommand::with_environment(
+            self.process_command.command(),
+            &arguments,
+            self.process_command.environment(),
+        )
+        .spawn()?;
 
         let stdin = child.stdin.as_mut().ok_or_else(|| {
             anyhow::anyhow!(
@@ -45,5 +59,46 @@ impl Formatter {
         } else {
             Ok(String::from_utf8(output.stdout)?)
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formatter_substitutes_file_path_without_shell_expansion() {
+        let formatter = Formatter::from(ProcessCommand::with_environment(
+            "sh",
+            &[
+                "-c".to_string(),
+                "printf '%s\\n' \"$#\" \"$1\" \"$2\" \"$3\" \"$FORMATTER_TEST\"; cat".to_string(),
+                "formatter".to_string(),
+                "{file_path}".to_string(),
+                "--stdin-filepath={file_path}".to_string(),
+                "literal".to_string(),
+            ],
+            &[("FORMATTER_TEST".to_string(), "preserved".to_string())].into(),
+        ));
+        let path = Path::new("/project with spaces/$(exit 1)/Component.vue");
+        assert_eq!(
+            formatter.format("input\n", path).unwrap(),
+            format!(
+                "3\n{}\n--stdin-filepath={}\nliteral\npreserved\ninput\n",
+                path.display(),
+                path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn formatter_without_placeholder_still_receives_stdin() {
+        let formatter = Formatter::from(ProcessCommand::new("cat", &[]));
+        assert_eq!(
+            formatter
+                .format("\tinput\n", Path::new("/project/main.rs"))
+                .unwrap(),
+            "\tinput\n"
+        );
     }
 }
