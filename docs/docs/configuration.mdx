@@ -22,6 +22,25 @@ Note: Workspace config overrides Global config.
 
 <AppConfigSchemaViewerFallback />
 
+## Formatters
+
+Standalone Ki sends the buffer contents to the configured formatter on stdin and reads the formatted contents from stdout. In formatter arguments, `{file_path}` is replaced with the absolute path of the file being saved. For example:
+
+```json
+{
+  "languages": {
+    "vue": {
+      "formatter": {
+        "command": "prettierd",
+        "arguments": ["{file_path}"]
+      }
+    }
+  }
+}
+```
+
+Passing the real filename lets the formatter discover configuration near the file, including nested Prettier and EditorConfig settings and filename-specific overrides. The formatter still runs in Ki's working directory. Arguments are passed directly, without shell expansion; do not add shell quotes around `{file_path}`.
+
 ## WakaTime
 
 Standalone Ki can send coding activity to WakaTime through `wakatime-cli`.

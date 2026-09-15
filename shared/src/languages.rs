@@ -279,7 +279,10 @@ fn csv() -> Language {
 fn c_sharp() -> Language {
     Language {
         extensions: to_vec(&["cs", "csx", "cake"]),
-        formatter: Some(Command::new("csharpier", &["format", "--write-stdout"])),
+        formatter: Some(Command::new(
+            "csharpier",
+            &["format", "--write-stdout", "--stdin-path", "{file_path}"],
+        )),
         lsp_command: Some(LspCommand {
             command: Command::new("omnisharp", &["--languageserver"]),
             ..LspCommand::default()
@@ -298,7 +301,7 @@ fn c_sharp() -> Language {
 fn css() -> Language {
     Language {
         extensions: to_vec(&["css"]),
-        formatter: Some(Command::new("prettierd", &[".css"])),
+        formatter: Some(Command::new("prettierd", &["{file_path}"])),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "css".to_string(),
             kind: GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::CSS),
@@ -311,7 +314,7 @@ fn css() -> Language {
 fn scss() -> Language {
     Language {
         extensions: to_vec(&["scss"]),
-        formatter: Some(Command::new("prettierd", &[".scss"])),
+        formatter: Some(Command::new("prettierd", &["{file_path}"])),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "scss".to_string(),
             kind: GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Scss),
@@ -525,7 +528,7 @@ fn go() -> Language {
 fn graphql() -> Language {
     Language {
         extensions: to_vec(&["graphql", "gql"]),
-        formatter: Some(Command::new("prettierd", &[".graphql"])),
+        formatter: Some(Command::new("prettierd", &["{file_path}"])),
         lsp_command: Some(LspCommand {
             command: Command::new("graphql-lsp", &["server", "-m", "stream"]),
             initialization_options: Some(
@@ -586,7 +589,7 @@ fn heex() -> Language {
         extensions: to_vec(&["heex"]),
         formatter: Some(Command::new(
             "mix",
-            &["format", "--stdin-filename", "file.heex", "-"],
+            &["format", "--stdin-filename", "{file_path}", "-"],
         )),
         lsp_command: Some(LspCommand {
             command: Command::new("elixir-ls", &[]),
@@ -625,7 +628,7 @@ fn latex() -> Language {
 fn html() -> Language {
     Language {
         extensions: to_vec(&["htm", "html", "svg"]),
-        formatter: Some(Command::new("prettierd", &[".html"])),
+        formatter: Some(Command::new("prettierd", &["{file_path}"])),
         lsp_command: Some(LspCommand {
             command: Command::new("emmet-language-server", &["--stdio"]),
             ..LspCommand::default()
@@ -707,7 +710,7 @@ fn java() -> Language {
 fn javascript() -> Language {
     Language {
         extensions: to_vec(&["js", "mjs", "cjs"]),
-        formatter: Some(Command::new("prettierd", &[".js"])),
+        formatter: Some(Command::new("prettierd", &["{file_path}"])),
         lsp_command: Some(LspCommand {
             command: Command::new("typescript-language-server", &["--stdio"]),
             ..LspCommand::default()
@@ -759,7 +762,7 @@ fn qmldir() -> Language {
 fn javascriptreact() -> Language {
     Language {
         extensions: to_vec(&["jsx"]),
-        formatter: Some(Command::new("prettierd", &[".jsx"])),
+        formatter: Some(Command::new("prettierd", &["{file_path}"])),
         lsp_command: Some(LspCommand {
             command: Command::new("typescript-language-server", &["--stdio"]),
             ..LspCommand::default()
@@ -796,7 +799,7 @@ fn svelte() -> Language {
 fn vue() -> Language {
     Language {
         extensions: to_vec(&["vue"]),
-        formatter: Some(Command::new("prettierd", &[".vue"])),
+        formatter: Some(Command::new("prettierd", &["{file_path}"])),
         lsp_language_id: Some(LanguageId::new("vue")),
         lsp_servers: vec![
             LspServerConfig {
@@ -850,7 +853,8 @@ fn vtsls_vue_initialization_options() -> serde_json::Value {
 fn json() -> Language {
     Language {
         extensions: to_vec(&["json", "jsonc", "gyp"]),
-        formatter: Some(Command::new("prettierd", &[".json"])),
+        // Prettier cannot infer a parser from every supported extension (e.g. .gyp).
+        formatter: Some(Command::new("prettierd", &["{file_path}", "--parser=json"])),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "json".to_string(),
             kind: GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::JSON),
@@ -933,7 +937,7 @@ fn lua() -> Language {
 fn markdown() -> Language {
     Language {
         extensions: to_vec(&["md", "mdx"]),
-        formatter: Some(Command::new("prettierd", &[".md"])),
+        formatter: Some(Command::new("prettierd", &["{file_path}"])),
         lsp_command: Some(LspCommand {
             command: Command::new("marksman", &["server"]),
             ..LspCommand::default()
@@ -1052,7 +1056,10 @@ fn php() -> Language {
 fn python() -> Language {
     Language {
         extensions: to_vec(&["py"]),
-        formatter: Some(Command::new("ruff", &["format", "--stdin-filename", ".py"])),
+        formatter: Some(Command::new(
+            "ruff",
+            &["format", "--stdin-filename", "{file_path}"],
+        )),
         lsp_command: Some(LspCommand {
             command: Command::new("pyright-langserver", &["--stdio"]),
             ..LspCommand::default()
@@ -1106,7 +1113,7 @@ fn rescript() -> Language {
         extensions: to_vec(&["res"]),
         formatter: Some(Command::new(
             "./node_modules/.bin/rescript",
-            &["format", "-stdin", ".res"],
+            &["format", "-stdin", "{file_path}"],
         )),
         lsp_command: Some(LspCommand {
             command: Command::new("./node_modules/.bin/rescript-language-server", &["--stdio"]),
@@ -1129,7 +1136,7 @@ fn ruby() -> Language {
         file_names: to_vec(&["Gemfile", "Rakefile", "Podfile", "Fastfile", "config.ru"]),
         formatter: Some(Command::new(
             "rubocop",
-            &["--fix-layout", "--stdin", "file.rb", "--stderr"],
+            &["--fix-layout", "--stdin", "{file_path}", "--stderr"],
         )),
         lsp_command: Some(LspCommand {
             command: Command::new("ruby-lsp", &[]),
@@ -1276,7 +1283,7 @@ fn tree_sitter_query() -> Language {
 fn typescript() -> Language {
     Language {
         extensions: to_vec(&["ts", "mts", "cts"]),
-        formatter: Some(Command::new("prettierd", &[".ts"])),
+        formatter: Some(Command::new("prettierd", &["{file_path}"])),
         lsp_command: Some(LspCommand {
             command: Command::new("typescript-language-server", &["--stdio"]),
             ..LspCommand::default()
@@ -1295,7 +1302,7 @@ fn typescript() -> Language {
 fn typescriptreact() -> Language {
     Language {
         extensions: to_vec(&["tsx"]),
-        formatter: Some(Command::new("prettierd", &[".tsx"])),
+        formatter: Some(Command::new("prettierd", &["{file_path}"])),
         lsp_command: Some(LspCommand {
             command: Command::new("typescript-language-server", &["--stdio"]),
             ..LspCommand::default()
