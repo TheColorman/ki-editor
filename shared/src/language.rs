@@ -164,6 +164,7 @@ pub struct Language {
     pub(crate) tree_sitter_grammar_config: Option<GrammarConfig>,
     /// The formatter command will receive the content from STDIN
     /// and is expected to return the formatted output to STDOUT.
+    /// `{file_path}` in arguments is replaced with the absolute path of the file being formatted.
     pub(crate) formatter: Option<Command>,
     #[schemars(example = "//")]
     pub(crate) line_comment_prefix: Option<String>,
