@@ -1,5 +1,6 @@
 use std::{
     io::{Read, Write},
+    path::Path,
     process::{Child, ExitStatus},
     sync::mpsc::{self, Receiver},
     thread,
@@ -25,12 +26,26 @@ impl From<ProcessCommand> for Formatter {
 }
 
 impl Formatter {
-    pub fn format(&self, content: &str) -> anyhow::Result<String> {
+    pub fn format(&self, content: &str, file_path: &Path) -> anyhow::Result<String> {
         // Run the command with the args,
         // pass in the content using stdin,
         // get the output from the stdout
 
-        let mut child = self.process_command.spawn()?;
+        let file_path = file_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Formatter file path is not valid UTF-8"))?;
+        let arguments = self
+            .process_command
+            .arguments()
+            .iter()
+            .map(|argument| argument.replace("{file_path}", file_path))
+            .collect::<Vec<_>>();
+        let mut child = ProcessCommand::with_environment(
+            self.process_command.command(),
+            &arguments,
+            self.process_command.environment(),
+        )
+        .spawn()?;
         let deadline = Instant::now() + self.timeout;
 
         let stdin = child.stdin.take().ok_or_else(|| {
@@ -145,7 +160,7 @@ mod test_formatter {
     #[test]
     fn formats_through_stdin_and_stdout() {
         let output = formatter("tr a-z A-Z", Duration::from_secs(10))
-            .format("hello")
+            .format("hello", std::path::Path::new("input.txt"))
             .unwrap();
         assert_eq!(output, "HELLO");
     }
@@ -154,7 +169,7 @@ mod test_formatter {
     fn handles_output_larger_than_pipe_buffer() {
         let content = "x".repeat(1024 * 1024);
         let output = formatter("cat", Duration::from_secs(10))
-            .format(&content)
+            .format(&content, std::path::Path::new("input.txt"))
             .unwrap();
         assert_eq!(output, content);
     }
@@ -163,7 +178,7 @@ mod test_formatter {
     fn hanging_formatter_is_killed_after_timeout() {
         let started_at = Instant::now();
         let error = formatter("cat > /dev/null; sleep 60", Duration::from_millis(200))
-            .format("hello")
+            .format("hello", std::path::Path::new("input.txt"))
             .unwrap_err();
         assert!(started_at.elapsed() < Duration::from_secs(5));
         assert!(
@@ -176,7 +191,7 @@ mod test_formatter {
     fn formatter_ignoring_its_stdin_is_killed_after_timeout() {
         let content = "x".repeat(1024 * 1024);
         let error = formatter("sleep 60", Duration::from_millis(200))
-            .format(&content)
+            .format(&content, std::path::Path::new("input.txt"))
             .unwrap_err();
         assert!(
             error.to_string().contains("did not finish within"),
@@ -187,8 +202,49 @@ mod test_formatter {
     #[test]
     fn failing_formatter_reports_stderr() {
         let error = formatter("echo oops >&2; exit 1", Duration::from_secs(10))
-            .format("hello")
+            .format("hello", std::path::Path::new("input.txt"))
             .unwrap_err();
         assert!(error.to_string().contains("oops"), "{error}");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formatter_substitutes_file_path_without_shell_expansion() {
+        let formatter = Formatter::from(ProcessCommand::with_environment(
+            "sh",
+            &[
+                "-c".to_string(),
+                "printf '%s\\n' \"$#\" \"$1\" \"$2\" \"$3\" \"$FORMATTER_TEST\"; cat".to_string(),
+                "formatter".to_string(),
+                "{file_path}".to_string(),
+                "--stdin-filepath={file_path}".to_string(),
+                "literal".to_string(),
+            ],
+            &[("FORMATTER_TEST".to_string(), "preserved".to_string())].into(),
+        ));
+        let path = Path::new("/project with spaces/$(exit 1)/Component.vue");
+        assert_eq!(
+            formatter.format("input\n", path).unwrap(),
+            format!(
+                "3\n{}\n--stdin-filepath={}\nliteral\npreserved\ninput\n",
+                path.display(),
+                path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn formatter_without_placeholder_still_receives_stdin() {
+        let formatter = Formatter::from(ProcessCommand::new("cat", &[]));
+        assert_eq!(
+            formatter
+                .format("\tinput\n", Path::new("/project/main.rs"))
+                .unwrap(),
+            "\tinput\n"
+        );
     }
 }

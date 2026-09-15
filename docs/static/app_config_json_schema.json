@@ -285,7 +285,7 @@
                     }
                 },
                 "formatter": {
-                    "description": "The formatter command will receive the content from STDIN\nand is expected to return the formatted output to STDOUT.",
+                    "description": "The formatter command will receive the content from STDIN\nand is expected to return the formatted output to STDOUT.\n`{file_path}` in arguments is replaced with the absolute path of the file being formatted.",
                     "anyOf": [
                         {
                             "$ref": "#/$defs/Command"
