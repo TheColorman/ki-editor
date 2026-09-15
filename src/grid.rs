@@ -20,7 +20,7 @@ pub struct Grid {
     pub width: usize,
 }
 
-const DEFAULT_TAB_SIZE: usize = 4;
+const DEFAULT_TAB_SIZE: usize = 2;
 pub const LINE_NUMBER_VERTICAL_BORDER: &str = "│";
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
@@ -1023,7 +1023,7 @@ mod test_grid {
                 .into_iter()
                 .map(|cell| cell.cell.symbol)
                 .collect_vec();
-            assert_eq!(['\t', ' ', ' ', ' ', 'h', 'e', 'l', ' '].to_vec(), actual);
+            assert_eq!(['\t', ' ', 'h', 'e', 'l', ' ', ' ', ' '].to_vec(), actual);
         }
 
         #[test]
@@ -1068,7 +1068,7 @@ x
 
     #[test]
     fn test_get_string_width() {
-        assert_eq!(get_string_width("\t\t"), 8);
+        assert_eq!(get_string_width("\t\t"), 4);
     }
 }
 

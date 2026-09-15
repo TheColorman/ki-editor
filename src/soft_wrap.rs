@@ -345,8 +345,8 @@ mod test_soft_wrap {
             vec![(6, "sponge".to_string()), (3, "bob".to_string())]
         );
         assert_eq!(
-            chop_str("\t\t", 6),
-            vec![(4, "\t".to_string()), (4, "\t".to_string())]
+            chop_str("\t\t", 3),
+            vec![(2, "\t".to_string()), (2, "\t".to_string())]
         );
     }
 
