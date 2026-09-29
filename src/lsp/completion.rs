@@ -12,6 +12,10 @@ use crate::{
 
 use super::documentation::Documentation;
 
+pub mod session;
+use super::manager::LspServerKey;
+use session::CompletionItemSource;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Completion {
     pub items: Vec<DropdownItem>,
@@ -160,6 +164,22 @@ impl CompletionItem {
     }
 
     pub fn dispatches(&self) -> crate::app::Dispatches {
+        self.dispatches_from(None)
+    }
+
+    pub fn into_dropdown_from(self, source: CompletionItemSource) -> DropdownItem {
+        let dispatches = self.dispatches_from(Some(source.server.clone()));
+        let resolve = Dispatch::ResolveCompletionItem {
+            completion_item: self.completion_item(),
+            source: Some(source.clone()),
+        };
+        DropdownItem::from(self)
+            .set_id(source.dropdown_id())
+            .set_dispatches(dispatches)
+            .set_on_focused(Dispatches::one(resolve))
+    }
+
+    fn dispatches_from(&self, server: Option<LspServerKey>) -> crate::app::Dispatches {
         Dispatches::one(Dispatch::ToEditor(DispatchEditor::ExecuteCompletion {
             replacement: self
                 .insert_text()
@@ -175,6 +195,7 @@ impl CompletionItem {
                 .clone()
                 .map(|command| Dispatch::LspExecuteCommand {
                     command: command.into(),
+                    server,
                 }),
         )
     }

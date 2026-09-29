@@ -41,6 +41,16 @@ Standalone Ki sends the buffer contents to the configured formatter on stdin and
 
 Passing the real filename lets the formatter discover configuration near the file, including nested Prettier and EditorConfig settings and filename-specific overrides. The formatter still runs in Ki's working directory. Arguments are passed directly, without shell expansion; do not add shell quotes around `{file_path}`.
 
+## Language Server Completions
+
+Standalone Ki can combine completions from multiple language servers. Each entry in a language's `lsp_servers` list can set:
+
+- `primary`: receive navigation and other interactive requests.
+- `completion`: contribute autocomplete suggestions. When omitted, this follows `primary`.
+- `diagnostics`: contribute diagnostics independently of completion and primary status.
+
+Use `"primary": false, "completion": true` for a supplementary completion server. Ki merges its suggestions with the primary server's results and sends completion-item resolution and associated commands back to the server that produced the item.
+
 ## WakaTime
 
 Standalone Ki can send coding activity to WakaTime through `wakatime-cli`.

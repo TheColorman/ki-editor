@@ -2028,10 +2028,7 @@ impl Editor {
             path,
             position,
             selection_end,
-            context: ResponseContext {
-                scope: None,
-                description: None,
-            },
+            context: ResponseContext::default(),
         })
     }
 

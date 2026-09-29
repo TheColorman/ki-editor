@@ -1937,7 +1937,7 @@ fn local_lsp_references() -> anyhow::Result<()> {
             App(HandleLspNotification(LspNotification::References(
                 crate::lsp::process::ResponseContext {
                     scope: Some(Scope::Local),
-                    description: None,
+                    ..Default::default()
                 },
                 [
                     Location {

@@ -48,9 +48,10 @@ impl From<CompletionItem> for DropdownItem {
         ))
         .set_info(item.info())
         .set_dispatches(item.dispatches())
-        .set_on_focused(Dispatches::one(Dispatch::ResolveCompletionItem(
-            item.completion_item(),
-        )))
+        .set_on_focused(Dispatches::one(Dispatch::ResolveCompletionItem {
+            completion_item: item.completion_item(),
+            source: None,
+        }))
     }
 }
 
@@ -101,6 +102,7 @@ impl Component for SuggestiveEditor {
             .handle_key_event(context, event)?
             .chain(match event {
                 key!("esc") => [
+                    Dispatch::DismissCompletion,
                     Dispatch::CloseDropdown,
                     Dispatch::CloseGlobalInfo,
                     Dispatch::CloseEditorInfo,
@@ -276,7 +278,9 @@ impl SuggestiveEditor {
         let current_item = self.completion_dropdown.current_item();
         if let Some(completion) = current_item {
             self.completion_dropdown.clear();
-            Ok(Dispatches::one(Dispatch::CloseDropdown).chain(completion.dispatches))
+            Ok(Dispatches::one(Dispatch::DismissCompletion)
+                .append(Dispatch::CloseDropdown)
+                .chain(completion.dispatches))
         } else {
             Ok(Dispatches::default())
         }

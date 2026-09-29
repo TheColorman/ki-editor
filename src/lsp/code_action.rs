@@ -25,10 +25,10 @@ impl CodeAction {
             .map(Dispatch::ApplyWorkspaceEdit)
             .into_iter()
             // If a code action provides an edit and a command, the edit must run first.
-            .chain(
-                self.command
-                    .map(|command| Dispatch::LspExecuteCommand { command }),
-            )
+            .chain(self.command.map(|command| Dispatch::LspExecuteCommand {
+                command,
+                server: None,
+            }))
             .collect_vec()
             .into()
     }

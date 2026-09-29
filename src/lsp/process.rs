@@ -29,9 +29,12 @@ use crate::lsp::server_config::resolve_initialization_options;
 use crate::utils::consolidate_errors;
 
 use super::code_action::CodeAction;
-use super::completion::{Completion, CompletionItem};
+use super::completion::session::{
+    CompletionContext, CompletionResponse as ServerCompletionResponse,
+};
 use super::goto_definition_response::GotoDefinitionResponse;
 use super::hover::Hover;
+use super::manager::LspServerKey;
 use super::prepare_rename_response::PrepareRenameResponse;
 use super::signature_help::SignatureHelp;
 use super::symbols::Symbols;
@@ -261,7 +264,7 @@ pub enum LspNotification {
         server_id: String,
         params: PublishDiagnosticsParams,
     },
-    Completion(ResponseContext, Completion),
+    Completion(ServerCompletionResponse),
     Hover(Hover),
     Definition(ResponseContext, GotoDefinitionResponse),
     References(ResponseContext, Vec<Location>),
@@ -281,7 +284,7 @@ pub enum LspNotification {
     SignatureHelp(Option<SignatureHelp>),
     DocumentSymbols(Symbols),
     WorkspaceSymbols(Symbols),
-    CompletionItemResolve(Box<lsp_types::CompletionItem>),
+    CompletionItemResolve(ResponseContext, Box<lsp_types::CompletionItem>),
     Progress {
         message: String,
     },
@@ -293,6 +296,7 @@ pub enum LspNotification {
 pub struct ResponseContext {
     pub scope: Option<Scope>,
     pub description: Option<String>,
+    pub completion: Option<Arc<CompletionContext>>,
 }
 impl ResponseContext {
     pub fn set_description(self, descrption: &str) -> Self {
@@ -714,6 +718,8 @@ impl LspServerProcess {
                             completion_item: Some(CompletionItemCapability {
                                 resolve_support: Some(CompletionItemCapabilityResolveSupport {
                                     properties: vec![
+                                        "documentation".to_string(),
+                                        "detail".to_string(),
                                         "textEdit".to_string(),
                                         "additionalTextEdits".to_string(),
                                     ],
@@ -1118,9 +1124,9 @@ impl LspServerProcess {
             let method = reply
                 .get("id")
                 .and_then(|id| id.as_u64())
-                .and_then(|id| self.pending_response_requests.get(&id))
-                .map(|request| request.method.as_str())
-                .unwrap_or("<unknown request>");
+                .and_then(|id| self.pending_response_requests.remove(&id))
+                .map(|request| request.method)
+                .unwrap_or_else(|| "<unknown request>".to_string());
             if let Some(hint) = hint_for_lsp_error(message) {
                 lsp_error!(
                     self.lsp_command(),
@@ -1159,32 +1165,12 @@ impl LspServerProcess {
                     return Ok(());
                 }
 
-                // Parse the reply as a Response
-                let response = serde_json::from_value::<
-                    json_rpc_types::Response<
-                        serde_json::Value,
-                        (),
-                        // Need to specify String here
-                        // Otherwise the default will be `str_buf::StrBuf<31>`,
-                        // which says the error message can only be 31 bytes long.
-                        String,
-                    >,
-                >(reply)
-                .map_err(|e| anyhow::anyhow!("Serde error = {:?}", e))?
-                .payload
-                .map_err(|e| {
-                    self.send_to_app(AppMessage::LspNotification(Box::new(
-                        LspNotification::Error(format!(
-                            "LSP JSON-RPC Error: {:?}: {}",
-                            e.code, e.message
-                        )),
-                    )));
-                    anyhow::anyhow!(
-                        "LSP JSON-RPC Error: Code={:?} Message={}",
-                        e.code,
-                        e.message
-                    )
-                })?;
+                // Errors were handled above. A present `result: null` is a valid
+                // LSP response (e.g. no completions), not a missing result field.
+                let response = reply
+                    .get("result")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("LSP response has no result: {reply:?}"))?;
 
                 let PendingResponseRequest {
                     method,
@@ -1226,22 +1212,28 @@ impl LspServerProcess {
                         let payload: <lsp_request!("textDocument/completion") as Request>::Result =
                             serde_json::from_value(response)?;
 
-                        if let Some(payload) = payload {
+                        if let Some(CompletionContext::Request(request)) =
+                            response_context.completion.as_deref()
+                        {
                             self.send_to_app(AppMessage::LspNotification(Box::new(
-                                LspNotification::Completion(
-                                    response_context,
-                                    Completion {
-                                        trigger_characters: self.trigger_characters(),
-                                        items: match payload {
-                                            CompletionResponse::Array(items) => items,
-                                            CompletionResponse::List(list) => list.items,
-                                        }
-                                        .into_iter()
-                                        .map(CompletionItem::from)
-                                        .map(|item| item.into())
-                                        .collect(),
+                                LspNotification::Completion(ServerCompletionResponse {
+                                    request: request.clone(),
+                                    server: LspServerKey {
+                                        language_id: self
+                                            .language
+                                            .id()
+                                            .expect("LSP language has an ID")
+                                            .to_string(),
+                                        server_id: self.server_config.id().to_string(),
+                                        root: self.current_working_directory.clone(),
                                     },
-                                ),
+                                    trigger_characters: self.trigger_characters(),
+                                    items: match payload {
+                                        Some(CompletionResponse::Array(items)) => items,
+                                        Some(CompletionResponse::List(list)) => list.items,
+                                        None => Vec::new(),
+                                    },
+                                }),
                             )));
                         }
                     }
@@ -1410,7 +1402,10 @@ impl LspServerProcess {
                             serde_json::from_value(response)?;
 
                         self.send_to_app(AppMessage::LspNotification(Box::new(
-                            LspNotification::CompletionItemResolve(Box::new(payload)),
+                            LspNotification::CompletionItemResolve(
+                                response_context,
+                                Box::new(payload),
+                            ),
                         )));
                     }
                     "workspace/symbol" => {
@@ -2403,6 +2398,10 @@ impl LspServerProcess {
                 .map(|p| p.resolve_provider.unwrap_or(false))
                 .unwrap_or(false)
         }) {
+            // Finish resolution locally when the server has no resolve support.
+            self.send_to_app(AppMessage::LspNotification(Box::new(
+                LspNotification::CompletionItemResolve(params.context, Box::new(completion_item)),
+            )));
             return Ok(());
         }
         self.send_request::<lsp_request!("completionItem/resolve")>(
