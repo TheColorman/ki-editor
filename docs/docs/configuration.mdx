@@ -51,6 +51,8 @@ Standalone Ki can combine completions from multiple language servers. Each entry
 
 Use `"primary": false, "completion": true` for a supplementary completion server. Ki merges its suggestions with the primary server's results and sends completion-item resolution and associated commands back to the server that produced the item.
 
+Built-in server behavior (workspace-root discovery, settings defaults, and installation helpers) is selected by the server's `id` or executable filename. Absolute executable paths are supported. When using a wrapper script, retain the built-in ID, such as `jdtls`, `omnisharp`, `eslint`, or `vue` for Vue's vtsls integration. Configuration defaults and validation are scoped to the selected server; explicit `initialization_options.settings` values take precedence. Servers without specialized behavior use package-workspace discovery and receive only their explicitly configured settings.
+
 ## WakaTime
 
 Standalone Ki can send coding activity to WakaTime through `wakatime-cli`.

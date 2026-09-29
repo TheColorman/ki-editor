@@ -1864,7 +1864,12 @@ impl<T: Frontend> App<T> {
                 let manager = self.lsp_manager();
                 let opened_documents = opened_documents
                     .into_iter()
-                    .filter(|document| manager.lsp_root_for_path(&language, &document.path) == root)
+                    .filter(|document| {
+                        manager
+                            .lsp_root_for_server(&language, &server_id, &document.path)
+                            .as_ref()
+                            == Some(&root)
+                    })
                     .collect();
                 manager.initialized(*language, server_id, root, opened_documents);
                 Ok(())

@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 
-use serde_json::json;
+use crate::language::{CargoLinkedTreesitterLanguage, GrammarConfigKind};
+use crate::language_servers;
 
-use crate::language::{CargoLinkedTreesitterLanguage, GrammarConfigKind, LspDiagnosticMode};
-
-use super::language::{Command, GrammarConfig, Language, LanguageId, LspCommand, LspServerConfig};
+use super::language::{Command, GrammarConfig, Language, LanguageId};
 
 fn to_vec(slice: &[&'static str]) -> Vec<String> {
     slice.iter().map(|s| s.to_string()).collect()
@@ -101,10 +100,7 @@ fn bash() -> Language {
         extensions: to_vec(&["sh", "bash"]),
         file_names: to_vec(&[".bashrc", ".bash_profile", "bashrc", "bash_profile"]),
         formatter: Some(Command::new("shfmt", &[])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("bash-language-server", &["start"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::bash_language_server::command()),
         lsp_language_id: Some(LanguageId::new("bash")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "bash".to_string(),
@@ -123,10 +119,7 @@ fn zsh() -> Language {
         // we can mostly use the bash one as-is.
         // For example, helix just consider all zsh files to just be bash.
         formatter: Some(Command::new("shfmt", &[])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("bash-language-server", &["start"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::bash_language_server::command()),
         lsp_language_id: Some(LanguageId::new("zsh")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "zsh".to_string(),
@@ -141,10 +134,7 @@ fn fish() -> Language {
     Language {
         extensions: to_vec(&["fish"]),
         formatter: Some(Command::new("fish --no-execute ", &[".fish"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("fish-lsp", &["start"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::fish_lsp::command()),
         lsp_language_id: Some(LanguageId::new("fish")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "fish".to_string(),
@@ -159,10 +149,7 @@ fn c() -> Language {
     Language {
         extensions: to_vec(&["c", "h"]),
         formatter: Some(Command::new("clang-format", &[])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("clangd", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::clangd::command()),
         lsp_language_id: Some(LanguageId::new("c")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "c".to_string(),
@@ -191,10 +178,7 @@ fn make() -> Language {
 fn racket() -> Language {
     Language {
         extensions: to_vec(&["rkt", "rktd", "rktl", "scrbl", "zuo"]),
-        lsp_command: Some(LspCommand {
-            command: Command::new("racket", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::racket::command()),
         lsp_language_id: Some(LanguageId::new("racket")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "racket".to_string(),
@@ -225,10 +209,7 @@ fn commonlisp() -> Language {
         extensions: to_vec(&[
             "lisp", "lsp", "l", "cl", "fasl", "sbcl", "el", "asd", "ny", "podsl", "sexp",
         ]),
-        lsp_command: Some(LspCommand {
-            command: Command::new("cl-lsp", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::cl_lsp::command()),
         lsp_language_id: Some(LanguageId::new("commonlisp")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "commonlisp".to_string(),
@@ -246,10 +227,7 @@ fn cpp() -> Language {
             "cu", "cuh", "cppm", "h++", "ii", "inl",
         ]),
         formatter: Some(Command::new("clang-format", &[])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("clangd", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::clangd::command()),
         lsp_language_id: Some(LanguageId::new("cpp")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "cpp".to_string(),
@@ -283,10 +261,7 @@ fn c_sharp() -> Language {
             "csharpier",
             &["format", "--write-stdout", "--stdin-path", "{file_path}"],
         )),
-        lsp_command: Some(LspCommand {
-            command: Command::new("omnisharp", &["--languageserver"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::omnisharp::command()),
         lsp_language_id: Some(LanguageId::new("csharp")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "c_sharp".to_string(),
@@ -368,11 +343,7 @@ fn elixir() -> Language {
     Language {
         extensions: to_vec(&["ex", "exs"]),
         formatter: Some(Command::new("mix", &["format", "-"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("elixir-ls", &[]),
-            initialization_options: None,
-            environment: HashMap::new(),
-        }),
+        lsp_command: Some(language_servers::elixir_ls::command()),
         lsp_language_id: Some(LanguageId::new("elixir")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "elixir".to_string(),
@@ -387,12 +358,7 @@ fn fsharp() -> Language {
     Language {
         extensions: to_vec(&["fs", "fsi", "fsx", "fsscript"]),
         formatter: None,
-        lsp_command: Some(LspCommand {
-            // Use --log-file and --log-level arguments to debug fsautocomplete issues.
-            // Example: --log-file /path/to/fsac.log --log-level debug
-            command: Command::new("fsautocomplete", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::fsautocomplete::command()),
         lsp_language_id: Some(LanguageId::new("fsharp")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "fsharp".to_string(),
@@ -492,10 +458,7 @@ fn gleam() -> Language {
     Language {
         extensions: to_vec(&["gleam"]),
         formatter: Some(Command::new("gleam", &["format", "--stdin"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("gleam", &["lsp"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::gleam::command()),
         lsp_language_id: Some(LanguageId::new("gleam")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "gleam".to_string(),
@@ -510,10 +473,7 @@ fn go() -> Language {
     Language {
         extensions: to_vec(&["go"]),
         formatter: Some(Command::new("gofmt", &[])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("gopls", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::gopls::command()),
         lsp_language_id: Some(LanguageId::new("go")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "go".to_string(),
@@ -529,13 +489,7 @@ fn graphql() -> Language {
     Language {
         extensions: to_vec(&["graphql", "gql"]),
         formatter: Some(Command::new("prettierd", &["{file_path}"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("graphql-lsp", &["server", "-m", "stream"]),
-            initialization_options: Some(
-                json! {r#"{ "graphql-config.load.legacy": true }"#.to_string()},
-            ),
-            environment: HashMap::new(),
-        }),
+        lsp_command: Some(language_servers::graphql_lsp::command()),
         lsp_language_id: Some(LanguageId::new("graphql")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "graphql".to_string(),
@@ -591,11 +545,7 @@ fn heex() -> Language {
             "mix",
             &["format", "--stdin-filename", "{file_path}", "-"],
         )),
-        lsp_command: Some(LspCommand {
-            command: Command::new("elixir-ls", &[]),
-            initialization_options: None,
-            environment: HashMap::new(),
-        }),
+        lsp_command: Some(language_servers::elixir_ls::command()),
         lsp_language_id: Some(LanguageId::new("heex")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "heex".to_string(),
@@ -610,11 +560,7 @@ fn latex() -> Language {
     Language {
         extensions: to_vec(&["tex"]),
         formatter: Some(Command::new("tex-fmt", &["-s"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("texlab", &[]),
-            initialization_options: None,
-            environment: HashMap::new(),
-        }),
+        lsp_command: Some(language_servers::texlab::command()),
         lsp_language_id: Some(LanguageId::new("latex")),
         line_comment_prefix: Some("%".to_string()),
         tree_sitter_grammar_config: Some(GrammarConfig {
@@ -629,10 +575,7 @@ fn html() -> Language {
     Language {
         extensions: to_vec(&["htm", "html", "svg"]),
         formatter: Some(Command::new("prettierd", &["{file_path}"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("emmet-language-server", &["--stdio"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::emmet_language_server::command()),
         lsp_language_id: Some(LanguageId::new("html")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "html".to_string(),
@@ -646,10 +589,7 @@ fn html() -> Language {
 fn idris() -> Language {
     Language {
         extensions: to_vec(&["idr", "lidr", "ipkg"]),
-        lsp_command: Some(LspCommand {
-            command: Command::new("idris2-lsp", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::idris2_lsp::command()),
         lsp_language_id: Some(LanguageId::new("idris")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "idris".to_string(),
@@ -662,10 +602,7 @@ fn idris() -> Language {
 fn haskell() -> Language {
     Language {
         extensions: to_vec(&["hs"]),
-        lsp_command: Some(LspCommand {
-            command: Command::new("haskell-language-server-wrapper", &["--lsp"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::haskell_language_server::command()),
         lsp_language_id: Some(LanguageId::new("haskell")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "haskell".to_string(),
@@ -678,25 +615,10 @@ fn haskell() -> Language {
 }
 
 fn java() -> Language {
-    let mut jdtls = LspServerConfig::new(
-        "jdtls",
-        Command::new("jdtls", &["-data", "${lsp_data_dir}"]),
-    );
-    jdtls.initialization_options = Some(json!({
-        "bundles": [],
-        "settings": {
-            "java": {
-                "signatureHelp": {
-                    "enabled": true
-                }
-            }
-        }
-    }));
-
     Language {
         extensions: to_vec(&["java"]),
         lsp_language_id: Some(LanguageId::new("java")),
-        lsp_servers: vec![jdtls],
+        lsp_servers: vec![language_servers::jdtls::config()],
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "java".to_string(),
             kind: GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Java),
@@ -711,10 +633,7 @@ fn javascript() -> Language {
     Language {
         extensions: to_vec(&["js", "mjs", "cjs"]),
         formatter: Some(Command::new("prettierd", &["{file_path}"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("typescript-language-server", &["--stdio"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::typescript_language_server::command()),
         lsp_language_id: Some(LanguageId::new("javascript")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "javascript".to_string(),
@@ -730,10 +649,7 @@ fn qml() -> Language {
     Language {
         extensions: to_vec(&["qml"]),
         formatter: None,
-        lsp_command: Some(LspCommand {
-            command: Command::new("qmlls6", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::qmlls::command()),
         lsp_language_id: Some(LanguageId::new("qmljs")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "qmljs".to_string(),
@@ -763,10 +679,7 @@ fn javascriptreact() -> Language {
     Language {
         extensions: to_vec(&["jsx"]),
         formatter: Some(Command::new("prettierd", &["{file_path}"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("typescript-language-server", &["--stdio"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::typescript_language_server::command()),
         lsp_language_id: Some(LanguageId::new("javascriptreact")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "jsx".to_string(),
@@ -781,10 +694,7 @@ fn javascriptreact() -> Language {
 fn svelte() -> Language {
     Language {
         extensions: to_vec(&["svelte"]),
-        lsp_command: Some(LspCommand {
-            command: Command::new("svelteserver", &["--stdio"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::svelte::command()),
         lsp_language_id: Some(LanguageId::new("svelte")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "svelte".to_string(),
@@ -802,28 +712,8 @@ fn vue() -> Language {
         formatter: Some(Command::new("prettierd", &["{file_path}"])),
         lsp_language_id: Some(LanguageId::new("vue")),
         lsp_servers: vec![
-            LspServerConfig {
-                id: "vue".to_string(),
-                command: Command::new("vtsls", &["--stdio"]),
-                language_id: Some(LanguageId::new("vue")),
-                initialization_options: Some(vtsls_vue_initialization_options()),
-                environment: HashMap::new(),
-                primary: true,
-                completion: None,
-                diagnostics: true,
-                diagnostic_mode: LspDiagnosticMode::Both,
-            },
-            LspServerConfig {
-                id: "eslint".to_string(),
-                command: Command::new("vscode-eslint-language-server", &["--stdio"]),
-                language_id: Some(LanguageId::new("vue")),
-                initialization_options: None,
-                environment: HashMap::new(),
-                primary: false,
-                completion: None,
-                diagnostics: true,
-                diagnostic_mode: LspDiagnosticMode::Pull,
-            },
+            language_servers::vtsls::vue(),
+            language_servers::eslint::config("vue"),
         ],
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "vue".to_string(),
@@ -832,24 +722,6 @@ fn vue() -> Language {
         block_comment_affixes: Some(("<!--".to_string(), "-->".to_string())),
         ..Language::new()
     }
-}
-
-fn vtsls_vue_initialization_options() -> serde_json::Value {
-    json!({
-        "typescript": {
-            "tsdk": "${workspace}/node_modules/typescript/lib"
-        },
-        "vtsls": {
-            "tsserver": {
-                "globalPlugins": [{
-                    "name": "@vue/typescript-plugin",
-                    "location": "${vue_typescript_plugin}",
-                    "languages": ["vue"],
-                    "enableForWorkspaceTypeScriptVersions": true
-                }]
-            }
-        }
-    })
 }
 
 fn json() -> Language {
@@ -868,19 +740,7 @@ fn json() -> Language {
 fn julia() -> Language {
     Language {
         extensions: to_vec(&["jl"]),
-        /* lsp_command: Some(LspCommand {
-            command: Command::new(
-                "julia",
-                &[
-                    "--startup-file=no",
-                    "--history-file=no",
-                    "--quiet",
-                    "-e",
-                    "'using LanguageServer; runserver()'",
-                ],
-            ),
-            ..LspCommand::default()
-        }), */
+        // lsp_command: Some(language_servers::julia::command()),
         lsp_language_id: Some(LanguageId::new("julia")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "julia".to_string(),
@@ -921,10 +781,7 @@ fn lua() -> Language {
     Language {
         extensions: to_vec(&["lua"]),
         formatter: Some(Command::new("stylua", &["-"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("lua-language-server", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::lua_language_server::command()),
         lsp_language_id: Some(LanguageId::new("lua")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "lua".to_string(),
@@ -940,10 +797,7 @@ fn markdown() -> Language {
     Language {
         extensions: to_vec(&["md", "mdx"]),
         formatter: Some(Command::new("prettierd", &["{file_path}"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("marksman", &["server"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::marksman::command()),
         lsp_language_id: Some(LanguageId::new("markdown")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "markdown".to_string(),
@@ -958,10 +812,7 @@ fn nix() -> Language {
     Language {
         formatter: Some(Command::new("nixfmt", &[])),
         extensions: to_vec(&["nix"]),
-        lsp_command: Some(LspCommand {
-            command: Command::new("nil", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::nil::command()),
         lsp_language_id: Some(LanguageId::new("nix")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "nix".to_string(),
@@ -977,10 +828,7 @@ fn ocaml() -> Language {
     Language {
         extensions: to_vec(&["ml"]),
         formatter: Some(Command::new("ocamlformat", &["-", "--impl"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("ocamllsp", &["--stdio"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::ocamllsp::command()),
         lsp_language_id: Some(LanguageId::new("ocaml")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "ocaml".to_string(),
@@ -995,10 +843,7 @@ fn ocaml_interface() -> Language {
     Language {
         extensions: to_vec(&["mli"]),
         formatter: Some(Command::new("ocamlformat", &["-", "--intf"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("ocamllsp", &["--stdio"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::ocamllsp::command()),
         lsp_language_id: Some(LanguageId::new("ocaml")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "ocaml_interface".to_string(),
@@ -1020,10 +865,7 @@ fn odin() -> Language {
         line_comment_prefix: Some("//".to_string()),
         block_comment_affixes: Some(("/*".to_string(), "*/".to_string())),
         lsp_language_id: Some(LanguageId::new("odin")),
-        lsp_command: Some(LspCommand {
-            command: Command::new("ols", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::ols::command()),
         ..Language::new()
     }
 }
@@ -1062,10 +904,7 @@ fn python() -> Language {
             "ruff",
             &["format", "--stdin-filename", "{file_path}"],
         )),
-        lsp_command: Some(LspCommand {
-            command: Command::new("pyright-langserver", &["--stdio"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::pyright::command()),
         lsp_language_id: Some(LanguageId::new("python")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "python".to_string(),
@@ -1096,10 +935,7 @@ fn perl() -> Language {
             "pm6",
         ]),
         //formatter: Some(Command::new("pertidy"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("perlnavigator", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::perlnavigator::command()),
         lsp_language_id: Some(LanguageId::new("perl")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "perl".to_string(),
@@ -1117,10 +953,7 @@ fn rescript() -> Language {
             "./node_modules/.bin/rescript",
             &["format", "-stdin", "{file_path}"],
         )),
-        lsp_command: Some(LspCommand {
-            command: Command::new("./node_modules/.bin/rescript-language-server", &["--stdio"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::rescript_language_server::command()),
         lsp_language_id: Some(LanguageId::new("rescript")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "rescript".to_string(),
@@ -1140,10 +973,7 @@ fn ruby() -> Language {
             "rubocop",
             &["--fix-layout", "--stdin", "{file_path}", "--stderr"],
         )),
-        lsp_command: Some(LspCommand {
-            command: Command::new("ruby-lsp", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::ruby_lsp::command()),
         lsp_language_id: Some(LanguageId::new("ruby")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "ruby".to_string(),
@@ -1188,10 +1018,7 @@ fn rust() -> Language {
     Language {
         extensions: to_vec(&["rs"]),
         formatter: Some(Command::new("rustfmt", &["--edition=2021"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("rust-analyzer", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::rust_analyzer::command()),
         lsp_language_id: Some(LanguageId::new("rust")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "rust".to_string(),
@@ -1221,10 +1048,7 @@ fn swift() -> Language {
     Language {
         extensions: to_vec(&["swift"]),
         formatter: Some(Command::new("swiftformat", &[])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("sourcekit-lsp", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::sourcekit_lsp::command()),
         lsp_language_id: Some(LanguageId::new("swift")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "swift".to_string(),
@@ -1240,10 +1064,7 @@ fn typst() -> Language {
     Language {
         extensions: to_vec(&["typ"]),
         formatter: Some(Command::new("typstyle", &["-i"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("tinymist", &["lsp"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::tinymist::command()),
         lsp_language_id: Some(LanguageId::new("typst")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "typst".to_string(),
@@ -1286,10 +1107,7 @@ fn typescript() -> Language {
     Language {
         extensions: to_vec(&["ts", "mts", "cts"]),
         formatter: Some(Command::new("prettierd", &["{file_path}"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("typescript-language-server", &["--stdio"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::typescript_language_server::command()),
         lsp_language_id: Some(LanguageId::new("typescript")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "typescript".to_string(),
@@ -1305,10 +1123,7 @@ fn typescriptreact() -> Language {
     Language {
         extensions: to_vec(&["tsx"]),
         formatter: Some(Command::new("prettierd", &["{file_path}"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("typescript-language-server", &["--stdio"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::typescript_language_server::command()),
         lsp_language_id: Some(LanguageId::new("typescriptreact")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "tsx".to_string(),
@@ -1323,10 +1138,7 @@ fn typescriptreact() -> Language {
 fn unison() -> Language {
     Language {
         extensions: to_vec(&["u"]),
-        lsp_command: Some(LspCommand {
-            command: Command::new("nc", &["localhost", "5757"]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::unison::command()),
         lsp_language_id: Some(LanguageId::new("unison")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "unison".to_string(),
@@ -1381,10 +1193,7 @@ fn zig() -> Language {
     Language {
         extensions: to_vec(&["zig"]),
         formatter: Some(Command::new("zig", &["fmt", "--stdin"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("zls", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::zls::command()),
         lsp_language_id: Some(LanguageId::new("zig")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "zig".to_string(),
@@ -1410,10 +1219,7 @@ fn scala() -> Language {
     Language {
         extensions: to_vec(&["scala"]),
         formatter: Some(Command::new("scalafmt", &["--stdin"])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("metals", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::metals::command()),
         lsp_language_id: Some(LanguageId::new("scala")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "scala".to_string(),
@@ -1429,10 +1235,7 @@ fn glsl() -> Language {
     Language {
         extensions: to_vec(&["glsl"]),
         formatter: Some(Command::new("clang-format", &[])),
-        lsp_command: Some(LspCommand {
-            command: Command::new("glsl_analyzer", &[]),
-            ..LspCommand::default()
-        }),
+        lsp_command: Some(language_servers::glsl_analyzer::command()),
         lsp_language_id: Some(LanguageId::new("glsl")),
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "glsl".to_string(),
@@ -1542,7 +1345,10 @@ mod test {
         assert_eq!(servers[0].process_command().command(), "vtsls");
         assert_eq!(servers[1].id(), "eslint");
         assert!(!servers[1].primary());
-        assert_eq!(servers[1].diagnostic_mode(), super::LspDiagnosticMode::Pull);
+        assert_eq!(
+            servers[1].diagnostic_mode(),
+            crate::language::LspDiagnosticMode::Pull
+        );
     }
 
     #[test]

@@ -618,6 +618,14 @@ impl LspServerConfig {
         &self.id
     }
 
+    pub fn behavior(&self) -> &'static dyn crate::language_servers::definition::ServerBehavior {
+        self.definition().behavior
+    }
+
+    pub fn definition(&self) -> &'static crate::language_servers::definition::ServerDefinition {
+        crate::language_servers::definition_for(self)
+    }
+
     pub fn language_id(&self) -> Option<LanguageId> {
         self.language_id.clone()
     }
