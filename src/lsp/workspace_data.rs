@@ -33,7 +33,7 @@ impl WorkspaceDataLease {
         #[cfg(windows)]
         {
             // Windows cannot currently terminate a launcher's complete process tree. Never reuse
-            // a slot that may still be owned by an orphaned JDTLS JVM after Ki exits.
+            // a slot that may still be owned by an orphaned server process after Ki exits.
             let slot = format!("session-{}", uuid::Uuid::new_v4());
             return Self::try_acquire_slot(&workspace_dir, &slot)?.ok_or_else(|| {
                 anyhow::anyhow!("Newly allocated LSP data slot was unexpectedly locked")

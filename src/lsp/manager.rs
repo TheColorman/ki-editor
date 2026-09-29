@@ -1,11 +1,10 @@
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use crate::app::AppMessage;
-use crate::lsp::server_config::resolve_configured_path;
+use shared::language_servers::configuration::ServerConfiguration;
 
 use super::process::{FromEditor, LspServerProcessChannel, OpenDocument};
 use shared::{
@@ -17,78 +16,44 @@ const LSP_RESTART_BASE_DELAY: Duration = Duration::from_millis(250);
 const LSP_RESTART_MAX_DELAY: Duration = Duration::from_secs(30);
 const LSP_STABLE_UPTIME: Duration = Duration::from_secs(30);
 
-fn is_package_workspace_root(path: &Path) -> bool {
-    [
-        "pnpm-workspace.yaml",
-        "pnpm-workspace.yml",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "package-lock.json",
-        "bun.lockb",
-        "bun.lock",
-    ]
-    .into_iter()
-    .any(|marker| path.join(marker).exists())
-}
-
-fn is_java_workspace_root(path: &Path) -> bool {
-    [
-        "settings.gradle",
-        "settings.gradle.kts",
-        "gradlew",
-        "gradlew.bat",
-        "mvnw",
-        "mvnw.cmd",
-    ]
-    .into_iter()
-    .any(|marker| path.join(marker).exists())
-        || path.join(".mvn").is_dir()
-}
-
-fn is_java_project_root(path: &Path) -> bool {
-    ["pom.xml", "build.gradle", "build.gradle.kts"]
-        .into_iter()
-        .any(|marker| path.join(marker).exists())
-}
-
-fn java_lsp_root(file_parent: &Path, boundary: &Path) -> PathBuf {
-    let stop_at_boundary = file_parent.starts_with(boundary);
-    let mut nearest_project = None;
-
-    for ancestor in file_parent.ancestors() {
-        if is_java_workspace_root(ancestor) {
-            return ancestor.to_path_buf();
-        }
-        if nearest_project.is_none() && is_java_project_root(ancestor) {
-            nearest_project = Some(ancestor.to_path_buf());
-        }
-        if stop_at_boundary && ancestor == boundary {
-            break;
-        }
-    }
-
-    nearest_project.unwrap_or_else(|| file_parent.to_path_buf())
-}
-
-fn contains_file_with_extension(path: &Path, extensions: &[&str]) -> bool {
-    std::fs::read_dir(path).is_ok_and(|entries| {
-        entries.filter_map(Result::ok).any(|entry| {
-            entry
-                .path()
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| {
-                    extensions
-                        .iter()
-                        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-                })
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attached_servers_choose_their_own_roots() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join("src"))?;
+        std::fs::write(project.join("pom.xml"), "")?;
+        let path: AbsolutePath = project.join("src/Component.vue").try_into()?;
+        let mut language = serde_json::to_value(crate::config::from_extension("vue").unwrap())?;
+        language["lsp_servers"] = serde_json::json!([
+            { "id": "jdtls", "command": { "command": "custom-wrapper", "arguments": [] }, "primary": true },
+            { "id": "other", "command": { "command": "other-server", "arguments": [] }, "completion": true }
+        ]);
+        let language: Language = serde_json::from_value(language)?;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, temp.path().try_into()?);
+        assert_eq!(
+            manager
+                .lsp_root_for_server(&language, "jdtls", &path)
+                .unwrap()
+                .as_ref(),
+            project
+        );
+        assert_eq!(
+            manager
+                .lsp_root_for_server(&language, "other", &path)
+                .unwrap()
+                .as_ref(),
+            temp.path()
+        );
+        assert!(manager
+            .lsp_root_for_server(&language, "unknown", &path)
+            .is_none());
+        Ok(())
+    }
 
     fn manager_with_disconnected_server(path: &AbsolutePath) -> anyhow::Result<LspManager> {
         let language = crate::config::from_path(path)
@@ -215,6 +180,52 @@ mod tests {
         let actual = manager.lsp_root_for_path(&language, &app.join("app.vue").try_into()?);
 
         assert_eq!(actual.as_ref(), frontend.as_path());
+        Ok(())
+    }
+
+    #[test]
+    fn package_marker_priority_depends_on_the_server_policy() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let workspace = tempdir.path().join("workspace");
+        let package = workspace.join("package");
+        let source = package.join("src");
+        std::fs::create_dir_all(&source)?;
+        std::fs::write(workspace.join("pnpm-workspace.yaml"), "")?;
+        std::fs::write(package.join("package.json"), "{}")?;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let manager = LspManager::new(sender, tempdir.path().try_into()?);
+
+        let vue = crate::config::from_extension("vue").unwrap();
+        let csharp = crate::config::from_extension("cs").unwrap();
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&vue, &source.join("App.vue").try_into()?)
+                .as_ref(),
+            workspace
+        );
+        // OmniSharp puts both package markers in the same fallback group.
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&csharp, &source.join("App.cs").try_into()?)
+                .as_ref(),
+            package
+        );
+
+        // A C# project outranks a nearer package fallback; a solution outranks both.
+        std::fs::write(workspace.join("App.CSPROJ"), "")?;
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&csharp, &source.join("App.cs").try_into()?)
+                .as_ref(),
+            workspace
+        );
+        std::fs::write(tempdir.path().join("App.SLNX"), "")?;
+        assert_eq!(
+            manager
+                .lsp_root_for_path(&csharp, &source.join("App.cs").try_into()?)
+                .as_ref(),
+            tempdir.path()
+        );
         Ok(())
     }
 
@@ -640,9 +651,9 @@ impl LspManager {
         let Some(language) = crate::config::from_path(path) else {
             return false;
         };
-        let root = self.lsp_root_for_path(&language, path);
         language.lsp_server_configs().into_iter().any(|config| {
-            Self::server_key(&language, config.id(), root.clone()).is_some_and(|key| {
+            let root = self.root_for_config(&config, path);
+            Self::server_key(&language, config.id(), root).is_some_and(|key| {
                 !self.lsp_server_process_channels.contains_key(&key)
                     && self.restart_states.contains_key(&key)
                     && self.server_can_start(&key)
@@ -667,7 +678,9 @@ impl LspManager {
         let is_primary = config.primary();
         let server_id = config.id().to_string();
         let command = config.process_command().to_string();
-        self.warn_missing_configured_lsp_paths(&root, &server_id, &config);
+        for warning in ServerConfiguration::new(&config, &root).validation_warnings() {
+            log::warn!("LSP server '{server_id}': {warning}");
+        }
         match LspServerProcessChannel::new(
             language.clone(),
             config,
@@ -701,59 +714,35 @@ impl LspManager {
         }
     }
 
-    pub(crate) fn lsp_root_for_path(
-        &self,
-        language: &Language,
-        path: &AbsolutePath,
-    ) -> AbsolutePath {
+    fn root_for_config(&self, config: &LspServerConfig, path: &AbsolutePath) -> AbsolutePath {
         let file_parent = path.as_ref().parent().unwrap_or(path.as_ref());
         let boundary = self.current_working_directory.as_ref();
-        let is_java = language.id().is_some_and(|id| id.to_string() == "java");
-        if is_java {
-            let root = java_lsp_root(file_parent, boundary);
-            let root = root.canonicalize().unwrap_or(root);
-            return root
-                .try_into()
-                .expect("Java root derived from an absolute file path must be absolute");
-        }
-        let mut nearest_package_root = None::<PathBuf>;
-        let mut nearest_csharp_project = None::<PathBuf>;
-        let is_csharp = language.tree_sitter_grammar_id().as_deref() == Some("c_sharp");
+        config
+            .definition()
+            .root_policy
+            .resolve(file_parent, boundary)
+            .try_into()
+            .unwrap_or_else(|_| self.current_working_directory.clone())
+    }
 
-        for ancestor in file_parent.ancestors() {
-            if is_csharp {
-                if contains_file_with_extension(ancestor, &["sln", "slnx"]) {
-                    return ancestor
-                        .try_into()
-                        .unwrap_or_else(|_| self.current_working_directory.clone());
-                }
-                if nearest_csharp_project.is_none()
-                    && contains_file_with_extension(ancestor, &["csproj"])
-                {
-                    nearest_csharp_project = Some(ancestor.to_path_buf());
-                }
-            }
-            if is_package_workspace_root(ancestor) {
-                if is_csharp {
-                    nearest_package_root.get_or_insert_with(|| ancestor.to_path_buf());
-                } else {
-                    return ancestor
-                        .try_into()
-                        .unwrap_or_else(|_| self.current_working_directory.clone());
-                }
-            }
-            if nearest_package_root.is_none() && ancestor.join("package.json").exists() {
-                nearest_package_root = Some(ancestor.to_path_buf());
-            }
-            if ancestor == boundary {
-                break;
-            }
-        }
+    /// Initialization notifications identify a particular server, whose root may
+    /// differ from the roots used by other servers attached to the same document.
+    pub(crate) fn lsp_root_for_server(
+        &self,
+        language: &Language,
+        server_id: &str,
+        path: &AbsolutePath,
+    ) -> Option<AbsolutePath> {
+        language
+            .lsp_server_configs()
+            .iter()
+            .find(|config| config.id() == server_id)
+            .map(|config| self.root_for_config(config, path))
+    }
 
-        nearest_csharp_project
-            .or(nearest_package_root)
-            .and_then(|path| path.as_path().try_into().ok())
-            .unwrap_or_else(|| self.current_working_directory.clone())
+    #[cfg(test)]
+    fn lsp_root_for_path(&self, language: &Language, path: &AbsolutePath) -> AbsolutePath {
+        self.root_for_config(&language.lsp_server_configs()[0], path)
     }
 
     fn is_lifecycle_message(from_editor: &FromEditor) -> bool {
@@ -768,67 +757,6 @@ impl LspManager {
         )
     }
 
-    fn warn_missing_configured_lsp_paths(
-        &self,
-        root: &AbsolutePath,
-        server_id: &str,
-        config: &shared::language::LspServerConfig,
-    ) {
-        let Some(options) = config.initialization_options() else {
-            return;
-        };
-
-        if let Some(tsdk) = options
-            .pointer("/typescript/tsdk")
-            .or_else(|| options.pointer("/typescript.tsdk"))
-            .and_then(|value| value.as_str())
-        {
-            let Some(resolved) = resolve_configured_path(root, tsdk) else {
-                log::warn!(
-                    "Unable to resolve configured TypeScript SDK placeholder {tsdk:?} for LSP server '{server_id}'"
-                );
-                return;
-            };
-            if !resolved.exists() {
-                log::warn!(
-                    "Configured LSP path for server '{server_id}' does not exist: typescript tsdk {tsdk:?} resolved to {}. If the server is installed/configured through Nix or another package manager, override this path in Ki config.",
-                    resolved.display()
-                );
-            }
-        }
-
-        if let Some(plugins) = options
-            .pointer("/vtsls/tsserver/globalPlugins")
-            .and_then(|value| value.as_array())
-        {
-            for plugin in plugins {
-                let Some(location) = plugin.get("location").and_then(|value| value.as_str()) else {
-                    continue;
-                };
-                let Some(resolved) = resolve_configured_path(root, location) else {
-                    let name = plugin
-                        .get("name")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("<unknown plugin>");
-                    log::warn!(
-                        "Unable to resolve configured LSP plugin placeholder for server '{server_id}': plugin {name:?} location {location:?}. If the plugin is provided by Nix or another package manager, override this location in Ki config."
-                    );
-                    continue;
-                };
-                if !resolved.exists() {
-                    let name = plugin
-                        .get("name")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("<unknown plugin>");
-                    log::warn!(
-                        "Configured LSP plugin path for server '{server_id}' does not exist: plugin {name:?} location {location:?} resolved to {}. If the plugin is provided by Nix or another package manager, override this location in Ki config.",
-                        resolved.display()
-                    );
-                }
-            }
-        }
-    }
-
     fn invoke_channels(
         &mut self,
         path: &AbsolutePath,
@@ -839,14 +767,14 @@ impl LspManager {
             return Ok(());
         };
         let configs = language.lsp_server_configs();
-        let root = self.lsp_root_for_path(&language, path);
         let configs = configs
             .into_iter()
             .filter(|config| Self::server_receives_message(config, from_editor));
 
         let mut errors = Vec::new();
         for config in configs {
-            let Some(key) = Self::server_key(&language, config.id(), root.clone()) else {
+            let root = self.root_for_config(&config, path);
+            let Some(key) = Self::server_key(&language, config.id(), root) else {
                 continue;
             };
             let result = match self.lsp_server_process_channels.get_mut(&key) {
@@ -962,7 +890,7 @@ impl LspManager {
         };
 
         for config in language.lsp_server_configs() {
-            let lsp_root = self.lsp_root_for_path(&language, path);
+            let lsp_root = self.root_for_config(&config, path);
             let Some(server_key) = Self::server_key(&language, config.id(), lsp_root.clone())
             else {
                 continue;
@@ -1042,16 +970,12 @@ impl LspManager {
         let Some(language) = crate::config::from_path(path) else {
             return Ok(());
         };
-        let Some(language_id) = language.id() else {
-            return Ok(());
-        };
-        let language_id = language_id.to_string();
-        let root = self.lsp_root_for_path(&language, path);
-        let keys = self
-            .lsp_server_process_channels
-            .keys()
-            .filter(|key| key.language_id == language_id && key.root == root)
-            .cloned()
+        let keys = language
+            .lsp_server_configs()
+            .iter()
+            .filter_map(|config| {
+                Self::server_key(&language, config.id(), self.root_for_config(config, path))
+            })
             .collect::<Vec<_>>();
         let channels = keys
             .into_iter()

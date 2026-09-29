@@ -1,28 +1,49 @@
 use super::super::*;
 
 #[test]
-fn workspace_configuration_includes_vue_eslint_validation() {
-    let root: AbsolutePath = std::env::current_dir().unwrap().try_into().unwrap();
+fn workspace_configuration_uses_the_requesting_servers_settings() {
+    let root: AbsolutePath = "/tmp/project".try_into().unwrap();
+    let server = serde_json::from_value(serde_json::json!({
+        "id": "test",
+        "command": { "command": "test-server", "arguments": [] },
+        "initialization_options": {
+            "settings": {
+                "editor": { "enabled": false, "sdk": "${workspace}/sdk" }
+            }
+        }
+    }))
+    .unwrap();
     let response = workspace_configuration_response(
         ConfigurationParams {
-            items: vec![ConfigurationItem {
+            items: [
+                Some("editor"),
+                Some("editor.enabled"),
+                Some("unknown"),
+                None,
+            ]
+            .into_iter()
+            .map(|section| ConfigurationItem {
                 scope_uri: None,
-                section: Some("eslint".to_string()),
-            }],
+                section: section.map(str::to_string),
+            })
+            .collect(),
         },
         &root,
-        None,
+        &server,
     );
-    let configs = response.as_array().unwrap();
-    assert!(configs[0]["validate"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("vue")));
+    assert_eq!(
+        response[0],
+        serde_json::json!({"enabled": false, "sdk": "/tmp/project/sdk"})
+    );
+    assert_eq!(response[1], false);
+    assert_eq!(response[2], serde_json::Value::Null);
+    assert_eq!(response[3]["editor"], response[0]);
 }
 
 #[test]
-fn workspace_configuration_includes_vue_typescript_plugin_for_vtsls() {
-    let root: AbsolutePath = std::env::current_dir().unwrap().try_into().unwrap();
+fn unknown_server_has_no_implicit_settings() {
+    let root: AbsolutePath = "/tmp/project".try_into().unwrap();
+    let server = LspServerConfig::new("test", shared::language::Command::new("test-server", &[]));
     let response = workspace_configuration_response(
         ConfigurationParams {
             items: vec![ConfigurationItem {
@@ -31,82 +52,14 @@ fn workspace_configuration_includes_vue_typescript_plugin_for_vtsls() {
             }],
         },
         &root,
-        None,
+        &server,
     );
-    let configs = response.as_array().unwrap();
-    assert_eq!(
-        configs[0]["typescript.tsdk"],
-        format!(
-            "{}/node_modules/typescript/lib",
-            std::env::current_dir().unwrap().display()
-        )
-    );
-    assert_eq!(
-        configs[0]["vtsls"]["tsserver"]["globalPlugins"][0]["name"],
-        "@vue/typescript-plugin"
-    );
+    assert_eq!(response, serde_json::json!([null]));
 }
 
 #[test]
-fn workspace_configuration_uses_java_initialization_settings() {
-    let root: AbsolutePath = "/tmp/java-project".try_into().unwrap();
-    let initialization_options = serde_json::json!({
-        "settings": {
-            "java": {
-                "signatureHelp": { "enabled": true },
-                "configuration": {
-                    "runtimes": [{ "path": "${workspace}/jdk", "name": "JavaSE-21" }]
-                }
-            }
-        }
-    });
-    let response = workspace_configuration_response(
-        ConfigurationParams {
-            items: vec![
-                ConfigurationItem {
-                    scope_uri: None,
-                    section: Some("java".to_string()),
-                },
-                ConfigurationItem {
-                    scope_uri: None,
-                    section: Some("java.signatureHelp.enabled".to_string()),
-                },
-                ConfigurationItem {
-                    scope_uri: None,
-                    section: Some("unknown".to_string()),
-                },
-            ],
-        },
-        &root,
-        Some(&initialization_options),
-    );
-    let configs = response.as_array().unwrap();
-
-    assert_eq!(configs[0]["signatureHelp"]["enabled"], true);
-    assert_eq!(
-        configs[0]["configuration"]["runtimes"][0]["path"],
-        "/tmp/java-project/jdk"
-    );
-    assert_eq!(configs[1], true);
-    assert_eq!(configs[2], serde_json::Value::Null);
-}
-
-#[test]
-fn lsp_error_hint_mentions_vue_typescript_plugin() {
-    let hint = hint_for_lsp_error(
-        "Request textDocument/definition failed with message: Cannot find provider for definition, the feature is possibly not supported by the current TypeScript version or disabled by settings.",
-    )
-    .unwrap();
-
-    assert!(hint.contains("@vue/typescript-plugin"));
-}
-
-#[test]
-fn lsp_error_hint_mentions_eslint_resolution() {
-    let hint = hint_for_lsp_error(
-        "Request textDocument/diagnostic failed with message: The \"path\" argument must be of type string. Received undefined",
-    )
-    .unwrap();
-
-    assert!(hint.contains("ESLint"));
+fn generic_error_hints_do_not_require_a_builtin_server() {
+    let server = LspServerConfig::new("test", shared::language::Command::new("test-server", &[]));
+    assert!(hint_for_lsp_error(&server, "Cannot find module example").is_some());
+    assert!(hint_for_lsp_error(&server, "Unexpected response").is_none());
 }

@@ -25,8 +25,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::app::AppMessage;
-use crate::lsp::server_config::resolve_initialization_options;
 use crate::utils::consolidate_errors;
+use shared::language_servers::configuration::ServerConfiguration;
 
 use super::code_action::CodeAction;
 use super::completion::session::{
@@ -68,111 +68,21 @@ fn diagnostics_from_document_diagnostic(
 fn workspace_configuration_response(
     params: ConfigurationParams,
     root: &AbsolutePath,
-    initialization_options: Option<&serde_json::Value>,
+    server: &LspServerConfig,
 ) -> serde_json::Value {
+    let configuration = ServerConfiguration::new(server, root);
     serde_json::Value::Array(
         params
             .items
             .into_iter()
-            .map(|item| configuration_value(item.section.as_deref(), root, initialization_options))
+            .map(|item| configuration.configuration(item.section.as_deref()))
             .collect(),
     )
 }
 
-fn configuration_value(
-    section: Option<&str>,
-    root: &AbsolutePath,
-    initialization_options: Option<&serde_json::Value>,
-) -> serde_json::Value {
-    if let Some(value) = configured_settings_value(section, initialization_options) {
-        return resolve_initialization_options(Some(value), root)
-            .unwrap_or(serde_json::Value::Null);
-    }
-
-    let value = match section {
-        Some("") => serde_json::json!({
-            "typescript.tsdk": "${workspace}/node_modules/typescript/lib",
-            "typescript.validate.enable": true,
-            "javascript.validate.enable": true,
-            "vtsls": {
-                "tsserver": {
-                    "globalPlugins": [{
-                        "name": "@vue/typescript-plugin",
-                        "location": "${vue_typescript_plugin}",
-                        "languages": ["vue"],
-                        "enableForWorkspaceTypeScriptVersions": true
-                    }]
-                }
-            }
-        }),
-        Some("typescript") => serde_json::json!({
-            "tsdk": "${workspace}/node_modules/typescript/lib",
-            "validate": { "enable": true }
-        }),
-        Some("vtsls") => serde_json::json!({
-            "tsserver": {
-                "globalPlugins": [{
-                    "name": "@vue/typescript-plugin",
-                    "location": "${vue_typescript_plugin}",
-                    "languages": ["vue"],
-                    "enableForWorkspaceTypeScriptVersions": true
-                }]
-            }
-        }),
-        Some("eslint") => serde_json::json!({
-            "enable": true,
-            "run": "onType",
-            "validate": ["javascript", "javascriptreact", "typescript", "typescriptreact", "vue"],
-            "probe": ["javascript", "javascriptreact", "typescript", "typescriptreact", "vue"],
-            "workingDirectories": [{ "mode": "auto" }]
-        }),
-        Some("eslint.enable") => serde_json::json!(true),
-        Some("eslint.run") => serde_json::json!("onType"),
-        Some("eslint.validate") => serde_json::json!([
-            "javascript",
-            "javascriptreact",
-            "typescript",
-            "typescriptreact",
-            "vue"
-        ]),
-        Some("eslint.probe") => serde_json::json!([
-            "javascript",
-            "javascriptreact",
-            "typescript",
-            "typescriptreact",
-            "vue"
-        ]),
-        Some("eslint.workingDirectories") => serde_json::json!([{ "mode": "auto" }]),
-        _ => serde_json::Value::Null,
-    };
-
-    resolve_initialization_options(Some(value), root).unwrap_or(serde_json::Value::Null)
-}
-
-fn configured_settings_value(
-    section: Option<&str>,
-    initialization_options: Option<&serde_json::Value>,
-) -> Option<serde_json::Value> {
-    let settings = initialization_options?.get("settings")?;
-    let Some(section) = section.filter(|section| !section.is_empty()) else {
-        return Some(settings.clone());
-    };
-
-    section
-        .split('.')
-        .try_fold(settings, |value, key| value.get(key))
-        .cloned()
-}
-
-fn hint_for_lsp_error(message: &str) -> Option<&'static str> {
-    if message.contains("Cannot find provider for definition") {
-        Some(
-            "For .vue files with vtsls, ensure the Vue TypeScript plugin is installed and configured for the server you are running. If using Nix-managed vtsls, make sure @vue/typescript-plugin is also available to that vtsls instance, or override the Vue lsp_servers initialization_options in Ki config to point to the plugin location.",
-        )
-    } else if message.contains("The \"path\" argument must be of type string") {
-        Some(
-            "The ESLint server failed while resolving a file path. Check that the ESLint server, eslint package, parser/plugins, and working-directory/config setup match your project. If using a non-node_modules install, ensure the server can still resolve the project eslint package and vue parser.",
-        )
+fn hint_for_lsp_error(server: &LspServerConfig, message: &str) -> Option<&'static str> {
+    if let Some(hint) = server.behavior().error_hint(message) {
+        Some(hint)
     } else if message.contains("Cannot find module") || message.contains("Failed to load plugin") {
         Some(
             "This usually means the language server could not resolve a required project package or plugin. Check the server command environment and package/plugin install location.",
@@ -660,10 +570,11 @@ impl LspServerProcess {
             None,
             InitializeParams {
                 process_id: None,
-                initialization_options: resolve_initialization_options(
-                    self.server_config.initialization_options(),
+                initialization_options: ServerConfiguration::new(
+                    &self.server_config,
                     &self.current_working_directory,
-                ),
+                )
+                .initialization_options(),
                 capabilities: ClientCapabilities {
                     workspace: Some(WorkspaceClientCapabilities {
                         apply_edit: Some(true),
@@ -1127,7 +1038,7 @@ impl LspServerProcess {
                 .and_then(|id| self.pending_response_requests.remove(&id))
                 .map(|request| request.method)
                 .unwrap_or_else(|| "<unknown request>".to_string());
-            if let Some(hint) = hint_for_lsp_error(message) {
+            if let Some(hint) = hint_for_lsp_error(&self.server_config, message) {
                 lsp_error!(
                     self.lsp_command(),
                     "LSP request {method} failed: {message}\nHint: {hint}"
@@ -1551,19 +1462,17 @@ impl LspServerProcess {
                                 .params
                                 .ok_or_else(|| anyhow::anyhow!("Missing params"))?,
                         )?;
-                        let initialization_options = self.server_config.initialization_options();
                         self.send_reply(
                             request.id,
                             workspace_configuration_response(
                                 params,
                                 &self.current_working_directory,
-                                initialization_options.as_ref(),
+                                &self.server_config,
                             ),
                         )?;
                     }
                     "window/workDoneProgress/create" => {
-                        // This reply is necessary for the Go LSP (gopls) to work
-                        // Null as the response is fine but maybe this should be handled properly
+                        // Acknowledge token creation before the server reports progress.
                         self.send_reply(request.id, serde_json::Value::Null)?;
                     }
                     "window/showMessage" => {
