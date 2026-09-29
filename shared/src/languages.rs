@@ -714,6 +714,7 @@ fn vue() -> Language {
         lsp_servers: vec![
             language_servers::vtsls::vue(),
             language_servers::eslint::config("vue"),
+            language_servers::tailwindcss::config("vue"),
         ],
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "vue".to_string(),
@@ -1334,12 +1335,12 @@ mod test {
     }
 
     #[test]
-    fn vue_uses_vue_and_eslint_lsp_servers() {
+    fn vue_uses_vue_eslint_and_tailwind_lsp_servers() {
         let languages = super::languages();
         let vue = languages.get("vue").unwrap();
         let servers = vue.lsp_server_configs();
 
-        assert_eq!(servers.len(), 2);
+        assert_eq!(servers.len(), 3);
         assert_eq!(servers[0].id(), "vue");
         assert!(servers[0].primary());
         assert_eq!(servers[0].process_command().command(), "vtsls");
@@ -1348,6 +1349,14 @@ mod test {
         assert_eq!(
             servers[1].diagnostic_mode(),
             crate::language::LspDiagnosticMode::Pull
+        );
+        assert!(!servers[1].completion());
+        assert_eq!(servers[2].id(), "tailwindcss");
+        assert!(!servers[2].primary());
+        assert!(servers[2].completion());
+        assert_eq!(
+            servers[2].process_command().command(),
+            "tailwindcss-language-server"
         );
     }
 

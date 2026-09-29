@@ -6,6 +6,32 @@ use crate::{
 };
 
 #[test]
+fn empty_capability_registration_batches_are_successful_noops() -> anyhow::Result<()> {
+    let (mut process, mut child, _app_receiver, _sender, _receiver, _tempdir, messages_path) =
+        process_for_server_requests()?;
+    for (id, (method, field)) in [
+        ("client/registerCapability", "registrations"),
+        ("client/unregisterCapability", "unregisterations"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        process.handle_reply(serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": method, "params": { field: [] }
+        }))?;
+    }
+    drop(process);
+    child.wait()?;
+    let messages = read_json_rpc_messages(&messages_path)?;
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(
+        |message| message.get("result") == Some(&serde_json::Value::Null)
+            && message.get("error").is_none()
+    ));
+    Ok(())
+}
+
+#[test]
 fn completion_protocol_preserves_request_identity_and_empty_responses() -> anyhow::Result<()> {
     let (mut process, mut child, app_receiver, _sender, _receiver, _tempdir, messages_path) =
         process_for_server_requests()?;

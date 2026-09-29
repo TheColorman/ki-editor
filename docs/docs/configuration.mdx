@@ -53,6 +53,39 @@ Use `"primary": false, "completion": true` for a supplementary completion server
 
 Built-in server behavior (workspace-root discovery, settings defaults, and installation helpers) is selected by the server's `id` or executable filename. Absolute executable paths are supported. When using a wrapper script, retain the built-in ID, such as `jdtls`, `omnisharp`, `eslint`, or `vue` for Vue's vtsls integration. Configuration defaults and validation are scoped to the selected server; explicit `initialization_options.settings` values take precedence. Servers without specialized behavior use package-workspace discovery and receive only their explicitly configured settings.
 
+### Tailwind CSS in Vue
+
+Vue's default servers include `tailwindcss-language-server --stdio` as a secondary completion and diagnostics provider. Install `@tailwindcss/language-server` with npm, or add the `tailwindcss-language-server` Nix package to your development shell. The executable must be available on the `PATH` inherited by Ki. The Prettier Tailwind plugin sorts classes but does not provide autocomplete.
+
+The Tailwind server also needs the project's `tailwindcss` package and a discoverable project entrypoint: a CSS file importing Tailwind for v4, or a Tailwind configuration file for v3. In a monorepo, Ki uses the enclosing package-workspace root, allowing the server to discover projects beneath it.
+
+For projects with multiple CSS entrypoints, the Tailwind server supports explicit stylesheet-to-file mappings. Supply its settings on the Tailwind entry in `lsp_servers`, for example:
+
+```json
+{
+  "id": "tailwindcss",
+  "command": {
+    "command": "tailwindcss-language-server",
+    "arguments": ["--stdio"]
+  },
+  "primary": false,
+  "completion": true,
+  "initialization_options": {
+    "settings": {
+      "tailwindCSS": {
+        "experimental": {
+          "configFile": {
+            "packages/ui/styles.css": ["apps/**", "packages/ui/**"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Paths in this example are relative to the language-server workspace root. Overriding `lsp_servers` replaces the entire list; retain the existing Vue and ESLint entries when customizing the Tailwind entry. These settings apply to standalone Ki; embedded VS Code sessions use VS Code's language integrations.
+
 ## WakaTime
 
 Standalone Ki can send coding activity to WakaTime through `wakatime-cli`.
