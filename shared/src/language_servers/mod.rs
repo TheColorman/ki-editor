@@ -43,6 +43,7 @@ pub mod ruby_lsp;
 pub mod rust_analyzer;
 pub mod sourcekit_lsp;
 pub mod svelte;
+pub mod tailwindcss;
 pub mod texlab;
 pub mod tinymist;
 pub mod typescript_language_server;

@@ -1505,11 +1505,29 @@ impl LspServerProcess {
                         self.send_reply(request.id, serde_json::Value::Null)?;
                     }
                     "client/registerCapability" | "client/unregisterCapability" => {
-                        self.send_error_reply(
-                            request.id,
-                            -32601,
-                            "Ki does not support dynamic LSP capability registration",
-                        )?;
+                        let field = if method == "client/registerCapability" {
+                            "registrations"
+                        } else {
+                            // This spelling is part of the LSP wire protocol.
+                            "unregisterations"
+                        };
+                        let is_empty = request
+                            .params
+                            .as_ref()
+                            .and_then(|params| params.get(field))
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(Vec::is_empty);
+                        if is_empty {
+                            // Some servers submit empty bulk
+                            // registrations even when using static capabilities.
+                            self.send_reply(request.id, serde_json::Value::Null)?;
+                        } else {
+                            self.send_error_reply(
+                                request.id,
+                                -32601,
+                                "Ki does not support dynamic LSP capability registration",
+                            )?;
+                        }
                     }
                     "window/logMessage" => {
                         let params: <lsp_notification!("window/logMessage") as Notification>::Params =

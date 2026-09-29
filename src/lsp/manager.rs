@@ -55,6 +55,37 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn secondary_completion_routing_preserves_primary_navigation() -> anyhow::Result<()> {
+        let path: AbsolutePath = std::env::current_dir()?.join("Component.vue").try_into()?;
+        let params = crate::app::RequestParams {
+            path: path.clone(),
+            position: crate::position::Position::default(),
+            selection_end: crate::position::Position::default(),
+            context: crate::lsp::process::ResponseContext::default(),
+        };
+        let servers = crate::config::from_extension("vue")
+            .unwrap()
+            .lsp_server_configs();
+        let recipients = |message| {
+            servers
+                .iter()
+                .filter(|server| LspManager::server_receives_message(server, &message))
+                .map(|server| server.id().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            recipients(FromEditor::TextDocumentCompletion(params.clone())),
+            ["vue", "tailwindcss"]
+        );
+        assert_eq!(recipients(FromEditor::TextDocumentHover(params)), ["vue"]);
+        assert_eq!(
+            recipients(FromEditor::TextDocumentDidClose { file_path: path }),
+            ["vue", "eslint", "tailwindcss"]
+        );
+        Ok(())
+    }
+
     fn manager_with_disconnected_server(path: &AbsolutePath) -> anyhow::Result<LspManager> {
         let language = crate::config::from_path(path)
             .ok_or_else(|| anyhow::anyhow!("test path has no configured language"))?;

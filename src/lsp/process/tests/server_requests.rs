@@ -44,7 +44,7 @@ fn dynamic_capability_registration_is_rejected() -> anyhow::Result<()> {
         "jsonrpc": "2.0",
         "id": 9,
         "method": "client/registerCapability",
-        "params": { "registrations": [] }
+        "params": { "registrations": [{ "id": "hover", "method": "textDocument/hover" }] }
     }))?;
 
     drop(process);
