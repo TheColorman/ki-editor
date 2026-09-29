@@ -208,6 +208,40 @@ mod test_dropdown_async {
     }
 
     #[test]
+    fn completion_selection_survives_another_servers_results() {
+        for size in [3, MIN_ITEMS_TO_TEST_NUCLEO + 10] {
+            let mut dropdown = make_dropdown("completion");
+            let items = (0..size)
+                .map(|i| DropdownItem::new(format!("item_{i:03}")).set_id(format!("vue:{i}")))
+                .collect_vec();
+            dropdown.inject_items(items.clone());
+            dropdown.handle_nucleo_notify();
+            dropdown.next_item();
+            let selected = dropdown.current_item().unwrap();
+            dropdown.inject_items(
+                std::iter::once(
+                    DropdownItem::new("aaa".to_string()).set_id("tailwind:0".to_string()),
+                )
+                .chain(items)
+                .collect(),
+            );
+            dropdown.handle_nucleo_notify();
+            assert_eq!(dropdown.current_item(), Some(selected));
+        }
+    }
+
+    #[test]
+    fn completion_resolve_does_not_replace_another_servers_same_label() {
+        let mut dropdown = make_dropdown("completion");
+        let vue = DropdownItem::new("flex".to_string()).set_id("vue:0".to_string());
+        let tailwind = DropdownItem::new("flex".to_string()).set_id("tailwind:0".to_string());
+        dropdown.inject_items(vec![vue.clone(), tailwind.clone()]);
+        dropdown.update_current_item(tailwind.set_resolved(true));
+        assert_eq!(dropdown.inner.items[0], vue);
+        assert!(dropdown.inner.items[1].resolved());
+    }
+
+    #[test]
     fn inject_items_uses_background_matching_when_items_exceed_threshold() {
         let mut dropdown = make_dropdown("test");
 

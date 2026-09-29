@@ -452,6 +452,9 @@ pub struct LspServerConfig {
     pub(crate) environment: HashMap<String, String>,
     #[serde(default)]
     pub(crate) primary: bool,
+    /// Whether this server supplies completions. Defaults to `primary` when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) completion: Option<bool>,
     #[serde(default = "default_true")]
     pub(crate) diagnostics: bool,
     #[serde(default)]
@@ -605,6 +608,7 @@ impl LspServerConfig {
             initialization_options: None,
             environment: HashMap::new(),
             primary: true,
+            completion: None,
             diagnostics: true,
             diagnostic_mode: LspDiagnosticMode::Push,
         }
@@ -626,6 +630,10 @@ impl LspServerConfig {
         self.primary
     }
 
+    pub fn completion(&self) -> bool {
+        self.completion.unwrap_or(self.primary)
+    }
+
     pub fn diagnostics(&self) -> bool {
         self.diagnostics
     }
@@ -640,6 +648,30 @@ impl LspServerConfig {
             &self.command.arguments,
             &self.environment,
         )
+    }
+}
+
+#[cfg(test)]
+mod lsp_server_config_tests {
+    use super::*;
+
+    #[test]
+    fn completion_defaults_to_primary_and_can_be_overridden() -> anyhow::Result<()> {
+        for primary in [false, true] {
+            for completion in [None, Some(false), Some(true)] {
+                let mut value = serde_json::json!({
+                    "id": "test", "command": { "command": "server", "arguments": ["--stdio"] },
+                    "primary": primary
+                });
+                if let Some(completion) = completion {
+                    value["completion"] = serde_json::json!(completion);
+                }
+                let server: LspServerConfig = serde_json::from_value(value)?;
+                assert_eq!(server.completion(), completion.unwrap_or(primary));
+                assert_eq!(server.primary(), primary);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -692,6 +724,7 @@ impl Language {
                     initialization_options: command.initialization_options.clone(),
                     environment: command.environment.clone(),
                     primary: true,
+                    completion: None,
                     diagnostics: true,
                     diagnostic_mode: LspDiagnosticMode::Push,
                 }]

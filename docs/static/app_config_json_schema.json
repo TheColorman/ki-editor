@@ -98,6 +98,7 @@
                 "QmlDir",
                 "JSX",
                 "Svelte",
+                "Vue",
                 "JSON",
                 "YAML",
                 "HTML",
@@ -130,9 +131,9 @@
                 "Hcl",
                 "Odin",
                 "CSharp",
+                "Razor",
                 "Clojure",
                 "FSharp",
-                "Java",
                 "Scala",
                 "Glsl",
                 "Devicetree",
@@ -271,7 +272,6 @@
                 },
                 "extensions": {
                     "type": "array",
-                    "examples": [["ts", "tsx"]],
                     "items": {
                         "type": "string"
                     }
@@ -279,7 +279,6 @@
                 "file_names": {
                     "description": "For files without extensions.",
                     "type": "array",
-                    "examples": [["Dockerfile"]],
                     "items": {
                         "type": "string"
                     }
@@ -318,6 +317,13 @@
                             "type": "null"
                         }
                     ]
+                },
+                "lsp_servers": {
+                    "type": "array",
+                    "default": [],
+                    "items": {
+                        "$ref": "#/$defs/LspServerConfig"
+                    }
                 },
                 "tree_sitter_grammar_config": {
                     "anyOf": [
@@ -376,6 +382,57 @@
             },
             "additionalProperties": false,
             "required": ["command"]
+        },
+        "LspDiagnosticMode": {
+            "type": "string",
+            "enum": ["push", "pull", "both"]
+        },
+        "LspServerConfig": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "$ref": "#/$defs/Command"
+                },
+                "completion": {
+                    "description": "Whether this server supplies completions. Defaults to `primary` when omitted.",
+                    "type": ["boolean", "null"]
+                },
+                "diagnostic_mode": {
+                    "$ref": "#/$defs/LspDiagnosticMode",
+                    "default": "push"
+                },
+                "diagnostics": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "environment": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "default": {}
+                },
+                "id": {
+                    "type": "string"
+                },
+                "initialization_options": true,
+                "language_id": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/LanguageId"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                },
+                "primary": {
+                    "type": "boolean",
+                    "default": false
+                }
+            },
+            "additionalProperties": false,
+            "required": ["id", "command"]
         },
         "Script": {
             "type": "string"

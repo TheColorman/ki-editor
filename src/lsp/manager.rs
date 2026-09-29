@@ -528,10 +528,10 @@ mod tests {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct LspServerKey {
-    language_id: String,
-    server_id: String,
-    root: AbsolutePath,
+pub struct LspServerKey {
+    pub language_id: String,
+    pub server_id: String,
+    pub root: AbsolutePath,
 }
 
 struct RestartState {
@@ -840,14 +840,9 @@ impl LspManager {
         };
         let configs = language.lsp_server_configs();
         let root = self.lsp_root_for_path(&language, path);
-        let configs = if Self::is_lifecycle_message(from_editor) {
-            configs
-        } else {
-            configs
-                .into_iter()
-                .filter(|config| config.primary())
-                .collect()
-        };
+        let configs = configs
+            .into_iter()
+            .filter(|config| Self::server_receives_message(config, from_editor));
 
         let mut errors = Vec::new();
         for config in configs {
@@ -889,6 +884,14 @@ impl LspManager {
         }
     }
 
+    fn server_receives_message(config: &LspServerConfig, message: &FromEditor) -> bool {
+        Self::is_lifecycle_message(message)
+            || match message {
+                FromEditor::TextDocumentCompletion(_) => config.completion(),
+                _ => config.primary(),
+            }
+    }
+
     pub fn send_message(
         &mut self,
         path: AbsolutePath,
@@ -919,6 +922,21 @@ impl LspManager {
         self.invoke_channels(&path, &from_editor, |channel| {
             channel.send_from_editor(from_editor.clone())
         })
+    }
+
+    /// Resolve and execute completion items only on the server that produced them.
+    /// Do not restart a missing server here: its old completion data is no longer valid.
+    pub fn send_to_server(
+        &mut self,
+        server: &LspServerKey,
+        message: FromEditor,
+    ) -> anyhow::Result<()> {
+        if let Some(channel) = self.lsp_server_process_channels.get_mut(server) {
+            if channel.is_running() {
+                channel.send_from_editor(message)?;
+            }
+        }
+        Ok(())
     }
 
     /// Open file can do one of the following:

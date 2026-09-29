@@ -1,3 +1,4 @@
+mod completion;
 mod configuration;
 mod document_sync;
 mod lifecycle;

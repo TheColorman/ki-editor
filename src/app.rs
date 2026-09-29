@@ -39,7 +39,10 @@ use crate::{
     layout::Layout,
     list::{self, Match, WalkBuilderConfig},
     lsp::{
-        completion::CompletionItem,
+        completion::{
+            session::{CompletionContext, CompletionRequest, CompletionSession},
+            CompletionItem,
+        },
         goto_definition_response::GotoDefinitionResponse,
         manager::LspManager,
         process::{
@@ -81,6 +84,8 @@ use std::{
 };
 use std::{sync::Arc, time::Duration};
 use DispatchEditor::*;
+
+mod completion;
 
 #[cfg(test)]
 use crate::{layout::BufferContentsMap, test_app::RunTestOptions};
@@ -130,6 +135,8 @@ pub struct App<T: Frontend> {
     /// Used for debouncing LSP Completion request, so that we don't overwhelm
     /// the server with too many requests, and also Ki with too many incoming Completion responses
     debounce_lsp_request_completion: Callback<()>,
+    completion_session: CompletionSession,
+    pending_completion: Option<(RequestParams, i32)>,
     pub multibuffer: Option<Multibuffer>,
 }
 
@@ -243,6 +250,8 @@ impl<T: Frontend> App<T> {
             .into_iter()
             .collect(),
             enable_lsp,
+            completion_session: CompletionSession::default(),
+            pending_completion: None,
             debounce_lsp_request_completion: {
                 let sender = sender.clone();
                 debounce(
@@ -791,6 +800,7 @@ impl<T: Frontend> App<T> {
     }
 
     pub fn handle_dispatch(&mut self, dispatch: Dispatch) -> Result<(), anyhow::Error> {
+        self.invalidate_stale_completion();
         log::info!("App::handle_dispatch = {}", dispatch.variant_name());
         match dispatch {
             Dispatch::Suspend => {
@@ -835,26 +845,13 @@ impl<T: Frontend> App<T> {
             Dispatch::OpenFilePicker(kind) => {
                 self.open_file_picker(kind)?;
             }
-            Dispatch::RequestCompletion => self.debounce_lsp_request_completion.call(()),
-            Dispatch::RequestCompletionDebounced => {
-                if let Some(params) = self.get_request_params() {
-                    self.lsp_manager().send_message(
-                        params.path.clone(),
-                        FromEditor::TextDocumentCompletion(params),
-                    )?;
-                }
-            }
-            Dispatch::ResolveCompletionItem(completion_item) => {
-                if let Some(params) = self.get_request_params() {
-                    self.lsp_manager().send_message(
-                        params.path.clone(),
-                        FromEditor::CompletionItemResolve {
-                            completion_item: Box::new(completion_item),
-                            params,
-                        },
-                    )?;
-                }
-            }
+            Dispatch::RequestCompletion => self.request_completion(),
+            Dispatch::DismissCompletion => self.dismiss_completion(),
+            Dispatch::RequestCompletionDebounced => self.request_completion_debounced()?,
+            Dispatch::ResolveCompletionItem {
+                completion_item,
+                source,
+            } => self.resolve_completion_item(completion_item, source)?,
             Dispatch::ResolveCodeAction(code_action) => {
                 if let Some(params) = self.get_request_params() {
                     self.lsp_manager().send_message(
@@ -1201,12 +1198,15 @@ impl<T: Frontend> App<T> {
             Dispatch::TerminalDimensionChanged(dimension) => self.resize(dimension),
             #[cfg(test)]
             Dispatch::SetGlobalTitle(title) => self.set_global_title(title),
-            Dispatch::LspExecuteCommand { command } => {
+            Dispatch::LspExecuteCommand { command, server } => {
                 if let Some(params) = self.get_request_params() {
-                    self.lsp_manager().send_message(
-                        params.path.clone(),
-                        FromEditor::WorkspaceExecuteCommand { params, command },
-                    )?;
+                    let path = params.path.clone();
+                    let message = FromEditor::WorkspaceExecuteCommand { params, command };
+                    if let Some(server) = server {
+                        self.lsp_manager().send_to_server(&server, message)?;
+                    } else {
+                        self.lsp_manager().send_message(path, message)?;
+                    }
                 };
             }
             Dispatch::UpdateLocalSearchConfig {
@@ -1793,6 +1793,7 @@ impl<T: Frontend> App<T> {
     }
 
     pub fn handle_lsp_notification(&mut self, notification: LspNotification) -> anyhow::Result<()> {
+        self.invalidate_stale_completion();
         match notification {
             LspNotification::Hover(hover) => self.show_editor_info(Info::new(
                 "Hover Info".to_string(),
@@ -1828,10 +1829,12 @@ impl<T: Frontend> App<T> {
                     locations.into_iter().map(QuickfixListItem::from).collect(),
                 ),
             ),
-            LspNotification::Completion(_context, completion) => {
-                self.handle_dispatch_suggestive_editor(DispatchSuggestiveEditor::Completion(
-                    completion,
-                ))?;
+            LspNotification::Completion(response) => {
+                if let Some(completion) = self.completion_session.receive(response) {
+                    self.handle_dispatch_suggestive_editor(DispatchSuggestiveEditor::Completion(
+                        completion,
+                    ))?;
+                }
 
                 Ok(())
             }
@@ -1945,8 +1948,20 @@ impl<T: Frontend> App<T> {
                 self.open_symbol_picker(symbols)?;
                 Ok(())
             }
-            LspNotification::CompletionItemResolve(completion_item) => {
-                self.update_current_completion_item((*completion_item).into())
+            LspNotification::CompletionItemResolve(context, completion_item) => {
+                if let Some(CompletionContext::Resolve(source)) = context.completion.as_deref() {
+                    if let Some(completion) = self
+                        .completion_session
+                        .resolve(source.clone(), *completion_item)
+                    {
+                        self.handle_dispatch_suggestive_editor(
+                            DispatchSuggestiveEditor::Completion(completion),
+                        )?;
+                    }
+                    Ok(())
+                } else {
+                    self.update_current_completion_item((*completion_item).into())
+                }
             }
             LspNotification::WorkspaceSymbols(symbols) => self.handle_workspace_symbols(symbols),
             LspNotification::Progress { message } => {
@@ -4171,6 +4186,7 @@ pub enum Dispatch {
     SetGlobalTitle(String),
     LspExecuteCommand {
         command: crate::lsp::code_action::Command,
+        server: Option<crate::lsp::manager::LspServerKey>,
     },
     UpdateLocalSearchConfig {
         update: LocalSearchConfigUpdate,
@@ -4211,7 +4227,11 @@ pub enum Dispatch {
     OpenThemePicker,
     OpenGitBranchPrompt,
     GitCheckout(String),
-    ResolveCompletionItem(lsp_types::CompletionItem),
+    ResolveCompletionItem {
+        completion_item: lsp_types::CompletionItem,
+        source: Option<crate::lsp::completion::session::CompletionItemSource>,
+    },
+    DismissCompletion,
     ResolveCodeAction(Box<lsp_types::CodeAction>),
     OpenPipeToShellPrompt,
     SetLastNonContiguousSelectionMode(Either<SelectionMode, GlobalMode>),

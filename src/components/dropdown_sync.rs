@@ -15,6 +15,8 @@ use super::suggestive_editor::{Decoration, Info};
 #[derive(Clone, Debug, PartialEq)]
 /// Note: filtering will be done on the combination of `display` and `group` (if applicable)
 pub struct DropdownItem {
+    /// Stable identity for asynchronously updated items; display text need not be unique.
+    id: Option<String>,
     pub dispatches: Dispatches,
     display: String,
     group: Option<String>,
@@ -39,6 +41,7 @@ impl DropdownItem {
 
     pub fn new(display: String) -> Self {
         Self {
+            id: None,
             dispatches: Dispatches::default(),
             display,
             group: None,
@@ -88,6 +91,25 @@ impl DropdownItem {
 
     pub fn resolved(&self) -> bool {
         self.resolved
+    }
+
+    pub fn set_id(self, id: String) -> Self {
+        Self {
+            id: Some(id),
+            ..self
+        }
+    }
+
+    pub fn set_resolved(self, resolved: bool) -> Self {
+        Self { resolved, ..self }
+    }
+
+    fn same_identity(&self, other: &Self) -> bool {
+        match (&self.id, &other.id) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => self.display == other.display,
+            _ => false,
+        }
     }
 
     pub fn from_path_buf(
@@ -303,9 +325,21 @@ impl DropdownSync {
         if items == self.items {
             return;
         }
+        let selected = self.current_item().filter(|item| item.id.is_some());
         self.items = items;
         self.current_item_index = 0;
         self.compute_filtered_items();
+        if let Some(selected) = selected {
+            if let Some(index) = self
+                .filtered_item_groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .find(|item| item.item.same_identity(&selected))
+                .map(|item| item.item_index)
+            {
+                self.current_item_index = index;
+            }
+        }
     }
 
     pub fn compute_filtered_items(&mut self) {
@@ -672,8 +706,7 @@ impl DropdownSync {
     }
 
     pub fn update_current_item(&mut self, item: DropdownItem) {
-        if let Some(matching) = self.items.iter_mut().find(|i| i.display == item.display) {
-            debug_assert!(!matching.resolved());
+        if let Some(matching) = self.items.iter_mut().find(|i| i.same_identity(&item)) {
             *matching = DropdownItem {
                 resolved: true,
                 ..item
