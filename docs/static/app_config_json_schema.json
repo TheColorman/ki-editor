@@ -430,6 +430,9 @@
                 "primary": {
                     "type": "boolean",
                     "default": false
+                },
+                "settings": {
+                    "description": "Values returned for workspace/configuration requests from this server."
                 }
             },
             "additionalProperties": false,

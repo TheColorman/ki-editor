@@ -1,5 +1,6 @@
 use crate::app::{RequestParams, Scope};
 use crate::lsp::progress_notification_manager::ProgressNotificationManager;
+use crate::lsp::server_config::{resolve_options, workspace_configuration};
 use crate::thread::Callback;
 use anyhow::Context;
 use debounce::EventDebouncer;
@@ -397,9 +398,13 @@ impl LspServerProcess {
             None,
             InitializeParams {
                 process_id: None,
-                initialization_options: self.server_config.initialization_options(),
+                initialization_options: self
+                    .server_config
+                    .initialization_options()
+                    .map(|value| resolve_options(value, &self.current_working_directory)),
                 capabilities: ClientCapabilities {
                     workspace: Some(WorkspaceClientCapabilities {
+                        configuration: Some(true),
                         apply_edit: Some(true),
                         workspace_edit: Some(WorkspaceEditClientCapabilities {
                             document_changes: Some(true),
@@ -1162,10 +1167,19 @@ impl LspServerProcess {
                         )));
                     }
                     "workspace/configuration" => {
-                        // Just return null for now, since I don't know how how to handle this properly
-                        // This reply is necessary for Graphql LSP to work
-
-                        self.send_reply(request.id, serde_json::Value::Null)?;
+                        let params: ConfigurationParams = serde_json::from_value(
+                            request
+                                .params
+                                .ok_or_else(|| anyhow::anyhow!("Missing params"))?,
+                        )?;
+                        self.send_reply(
+                            request.id,
+                            workspace_configuration(
+                                params,
+                                &self.server_config,
+                                &self.current_working_directory,
+                            ),
+                        )?;
                     }
                     "window/workDoneProgress/create" => {
                         // This reply is necessary for the Go LSP (gopls) to work
