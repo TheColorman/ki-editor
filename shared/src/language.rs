@@ -338,6 +338,17 @@ pub struct LspServerConfig {
     pub(crate) primary: bool,
     #[serde(default = "default_true")]
     pub(crate) diagnostics: bool,
+    #[serde(default)]
+    pub(crate) diagnostic_mode: LspDiagnosticMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LspDiagnosticMode {
+    #[default]
+    Push,
+    Pull,
+    Both,
 }
 
 const fn default_true() -> bool {
@@ -491,6 +502,7 @@ impl LspServerConfig {
             environment: HashMap::new(),
             primary: true,
             diagnostics: true,
+            diagnostic_mode: LspDiagnosticMode::Push,
         }
     }
 
@@ -512,6 +524,10 @@ impl LspServerConfig {
 
     pub fn diagnostics(&self) -> bool {
         self.diagnostics
+    }
+
+    pub fn diagnostic_mode(&self) -> LspDiagnosticMode {
+        self.diagnostic_mode
     }
 
     pub fn process_command(&self) -> ProcessCommand {
@@ -573,6 +589,7 @@ impl Language {
                     environment: command.environment.clone(),
                     primary: true,
                     diagnostics: true,
+                    diagnostic_mode: LspDiagnosticMode::Push,
                 }]
             })
             .unwrap_or_default()

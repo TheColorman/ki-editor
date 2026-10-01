@@ -11,7 +11,7 @@ use lsp_types::request::{
 use lsp_types::*;
 use my_proc_macros::NamedVariant;
 use shared::absolute_path::AbsolutePath;
-use shared::language::{Language, LspServerConfig};
+use shared::language::{Language, LspDiagnosticMode, LspServerConfig};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 
@@ -46,6 +46,18 @@ macro_rules! lsp_error {
         log::error!("{{{}}} {}", $command, format_args!($($arg)*))
     };
 }
+fn diagnostics_from_document_report(
+    report: DocumentDiagnosticReportResult,
+) -> Option<Vec<Diagnostic>> {
+    match report {
+        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(report)) => {
+            Some(report.full_document_diagnostic_report.items)
+        }
+        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Unchanged(_))
+        | DocumentDiagnosticReportResult::Partial(_) => None,
+    }
+}
+
 struct LspServerProcess {
     language: Language,
     server_config: LspServerConfig,
@@ -430,6 +442,10 @@ impl LspServerProcess {
                             }),
                             code_description_support: Some(true),
                             ..PublishDiagnosticsClientCapabilities::default()
+                        }),
+                        diagnostic: Some(DiagnosticClientCapabilities {
+                            dynamic_registration: Some(false),
+                            related_document_support: Some(false),
                         }),
                         completion: Some(CompletionClientCapabilities {
                             completion_item: Some(CompletionItemCapability {
@@ -874,6 +890,24 @@ impl LspServerProcess {
                             )));
                         }
                     }
+                    "textDocument/diagnostic" => {
+                        let report: DocumentDiagnosticReportResult =
+                            serde_json::from_value(response)?;
+                        if let (Some(path), Some(diagnostics)) =
+                            (path, diagnostics_from_document_report(report))
+                        {
+                            self.send_to_app(AppMessage::LspNotification(Box::new(
+                                LspNotification::PublishDiagnostics {
+                                    server_id: self.server_config.id().to_string(),
+                                    params: PublishDiagnosticsParams {
+                                        uri: path_buf_to_url(path)?,
+                                        diagnostics,
+                                        version: None,
+                                    },
+                                },
+                            )));
+                        }
+                    }
                     "textDocument/hover" => {
                         let payload: <lsp_request!("textDocument/hover") as Request>::Result =
                             serde_json::from_value(response)?;
@@ -1100,7 +1134,9 @@ impl LspServerProcess {
                 }
                 match method.as_str() {
                     "textDocument/publishDiagnostics" => {
-                        if !self.server_config.diagnostics() {
+                        if !self.server_config.diagnostics()
+                            || self.server_config.diagnostic_mode() == LspDiagnosticMode::Pull
+                        {
                             return Ok(());
                         }
                         let params: <lsp_notification!("textDocument/publishDiagnostics") as Notification>::Params =
@@ -1351,13 +1387,14 @@ impl LspServerProcess {
         self.send_notification::<lsp_notification!("textDocument/didOpen")>(
             DidOpenTextDocumentParams {
                 text_document: TextDocumentItem {
-                    uri: path_buf_to_url(file_path)?,
+                    uri: path_buf_to_url(file_path.clone())?,
                     language_id,
                     version: version as i32,
                     text: content,
                 },
             },
-        )
+        )?;
+        self.request_document_diagnostics(file_path)
     }
 
     fn text_document_did_change(
@@ -1369,7 +1406,7 @@ impl LspServerProcess {
         self.send_notification::<lsp_notification!("textDocument/didChange")>(
             DidChangeTextDocumentParams {
                 text_document: VersionedTextDocumentIdentifier {
-                    uri: path_buf_to_url(file_path)?,
+                    uri: path_buf_to_url(file_path.clone())?,
                     version,
                 },
                 content_changes: vec![TextDocumentContentChangeEvent {
@@ -1378,14 +1415,42 @@ impl LspServerProcess {
                     text: content,
                 }],
             },
-        )
+        )?;
+        self.request_document_diagnostics(file_path)
     }
 
     fn text_document_did_save(&mut self, file_path: AbsolutePath) -> Result<(), anyhow::Error> {
         self.send_notification::<lsp_notification!("textDocument/didSave")>(
             DidSaveTextDocumentParams {
-                text_document: path_buf_to_text_document_identifier(file_path)?,
+                text_document: path_buf_to_text_document_identifier(file_path.clone())?,
                 text: None,
+            },
+        )?;
+        self.request_document_diagnostics(file_path)
+    }
+
+    fn request_document_diagnostics(&mut self, file_path: AbsolutePath) -> anyhow::Result<()> {
+        if !self.server_config.diagnostics()
+            || !matches!(
+                self.server_config.diagnostic_mode(),
+                LspDiagnosticMode::Pull | LspDiagnosticMode::Both
+            )
+            || self
+                .server_capabilities
+                .as_ref()
+                .is_none_or(|capabilities| capabilities.diagnostic_provider.is_none())
+        {
+            return Ok(());
+        }
+        self.send_request::<lsp_request!("textDocument/diagnostic")>(
+            ResponseContext::default(),
+            Some(file_path.clone()),
+            DocumentDiagnosticParams {
+                text_document: path_buf_to_text_document_identifier(file_path)?,
+                identifier: None,
+                previous_result_id: None,
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
             },
         )
     }
@@ -2008,6 +2073,39 @@ mod test_lsp_server_process {
     use super::*;
     use std::process::Command;
     use std::sync::mpsc;
+
+    #[test]
+    fn full_and_unchanged_diagnostic_reports() {
+        let diagnostic = Diagnostic::new_simple(Range::default(), "example".to_string());
+        let report = |items| {
+            DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(
+                RelatedFullDocumentDiagnosticReport {
+                    related_documents: None,
+                    full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                        result_id: None,
+                        items,
+                    },
+                },
+            ))
+        };
+        assert_eq!(
+            diagnostics_from_document_report(report(vec![diagnostic.clone()])),
+            Some(vec![diagnostic])
+        );
+        assert_eq!(
+            diagnostics_from_document_report(report(vec![])),
+            Some(vec![])
+        );
+        let unchanged = DocumentDiagnosticReportResult::Report(
+            DocumentDiagnosticReport::Unchanged(RelatedUnchangedDocumentDiagnosticReport {
+                related_documents: None,
+                unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                    result_id: "same".to_string(),
+                },
+            }),
+        );
+        assert_eq!(diagnostics_from_document_report(unchanged), None);
+    }
 
     #[test]
     fn lsp_should_shutdown_after_too_many_consecutive_errors() -> anyhow::Result<()> {

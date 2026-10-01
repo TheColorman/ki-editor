@@ -388,11 +388,19 @@
             "additionalProperties": false,
             "required": ["command"]
         },
+        "LspDiagnosticMode": {
+            "type": "string",
+            "enum": ["push", "pull", "both"]
+        },
         "LspServerConfig": {
             "type": "object",
             "properties": {
                 "command": {
                     "$ref": "#/$defs/Command"
+                },
+                "diagnostic_mode": {
+                    "$ref": "#/$defs/LspDiagnosticMode",
+                    "default": "push"
                 },
                 "diagnostics": {
                     "type": "boolean",
