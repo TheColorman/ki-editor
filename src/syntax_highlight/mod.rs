@@ -79,32 +79,31 @@ impl Highlight for HighlightConfiguration {
     }
 }
 
-fn collect_highlighted_spans(
-    highlights: impl Iterator<Item = Result<HighlightEvent, tree_sitter_highlight::Error>>,
+fn collect_highlighted_spans<'a>(
+    highlights: impl Iterator<Item = Result<HighlightEvent, tree_sitter_highlight::Error>> + 'a,
 ) -> anyhow::Result<HighlightedSpans> {
-    let (_, highlighted_spans) = highlights.into_iter().try_fold(
-        (Vec::new(), Vec::new()),
-        |(mut highlight_events, mut highlighted_spans), event| -> anyhow::Result<_> {
-            match event? {
-                HighlightEvent::HighlightStart(s) => {
-                    highlight_events.push(s);
-                }
-                HighlightEvent::HighlightEnd => {
-                    highlight_events.pop();
-                }
-                HighlightEvent::Source { start, end } => {
-                    if let Some(highlight) = highlight_events.last() {
-                        let style_key = StyleKey::Syntax(IndexedHighlightGroup::new(highlight.0));
-                        highlighted_spans.push(HighlightedSpan {
-                            byte_range: start..end,
-                            style_key,
-                        });
-                    }
+    let mut highlight_events = vec![];
+    let mut highlighted_spans = vec![];
+
+    for event in highlights {
+        match event? {
+            HighlightEvent::HighlightStart(s) => {
+                highlight_events.push(s);
+            }
+            HighlightEvent::HighlightEnd => {
+                highlight_events.pop();
+            }
+            HighlightEvent::Source { start, end } => {
+                if let Some(highlight) = highlight_events.last() {
+                    let style_key = StyleKey::Syntax(IndexedHighlightGroup::new(highlight.0));
+                    highlighted_spans.push(HighlightedSpan {
+                        byte_range: start..end,
+                        style_key,
+                    });
                 }
             }
-            Ok((highlight_events, highlighted_spans))
-        },
-    )?;
+        }
+    }
 
     debug_assert!(highlighted_spans
         .iter()
@@ -267,10 +266,11 @@ impl HighlightConfigs {
             return Ok(HighlightedSpans::default());
         };
 
-        language
-            .injected_language_ids()
-            .filter_map(language_from_injection_name)
-            .try_for_each(|language| self.ensure_highlight_config(language).map(|_| ()))?;
+        for injected_language_id in language.injected_language_ids() {
+            if let Some(injected_language) = language_from_injection_name(injected_language_id) {
+                self.ensure_highlight_config(injected_language)?;
+            }
+        }
 
         let configs = &self.0;
         let config = configs.get(&grammar_id).ok_or_else(|| {
@@ -295,14 +295,14 @@ impl HighlightConfigs {
     }
 }
 
-pub(crate) fn language_from_injection_name(name: &str) -> Option<Language> {
+fn language_from_injection_name(name: &str) -> Option<Language> {
     let language_key = match name {
         "js" | "javascript" => "javascript",
         "jsx" => "javascriptreact",
         "ts" | "typescript" => "typescript",
         "tsx" => "typescriptreact",
         "css" => "css",
-        "scss" => "scss",
+        "scss" | "sass" | "less" | "postcss" => "scss",
         _ => name,
     };
     crate::config::AppConfig::singleton()

@@ -9,6 +9,108 @@ use tree_sitter::Query;
 pub(crate) use crate::process_command::ProcessCommand;
 use crate::{formatter::Formatter, ts_highlight_query::get_highlight_query};
 
+const VUE_HIGHLIGHTS_QUERY: &str = r#"
+[
+  (template_element)
+  (tag_name)
+  (start_tag)
+  (end_tag)
+] @tag
+
+(erroneous_end_tag_name) @error
+(attribute_name) @tag.attribute
+(attribute_value) @property
+(quoted_attribute_value) @string
+(comment) @comment
+
+(interpolation) @punctuation.special
+(interpolation
+  (raw_text) @none)
+
+[
+  (directive_modifier)
+  (directive_name)
+  (directive_value)
+  (dynamic_directive_inner_value)
+] @tag.attribute
+
+"=" @operator
+
+[
+  "<"
+  ">"
+  "</"
+  "/>"
+] @tag.delimiter
+"#;
+
+const VUE_INJECTIONS_QUERY: &str = r#"
+; <script>
+(script_element
+  (raw_text) @injection.content
+  (#set! injection.language "javascript"))
+
+; <script lang="js">
+((script_element
+  (start_tag
+    (attribute
+      (attribute_name) @_lang
+      (quoted_attribute_value
+        (attribute_value) @_js)))
+  (raw_text) @injection.content)
+  (#eq? @_lang "lang")
+  (#eq? @_js "js")
+  (#set! injection.language "javascript"))
+
+; <script lang="ts">
+((script_element
+  (start_tag
+    (attribute
+      (attribute_name) @_lang
+      (quoted_attribute_value
+        (attribute_value) @_ts)))
+  (raw_text) @injection.content)
+  (#eq? @_lang "lang")
+  (#eq? @_ts "ts")
+  (#set! injection.language "typescript"))
+
+; <script lang="tsx"> and <script lang="jsx">
+(script_element
+  (start_tag
+    (attribute
+      (attribute_name) @_lang
+      (quoted_attribute_value
+        (attribute_value) @injection.language)))
+  (raw_text) @injection.content
+  (#eq? @_lang "lang")
+  (#any-of? @injection.language "tsx" "jsx"))
+
+; <style> defaults to CSS.
+(style_element
+  (raw_text) @injection.content
+  (#set! injection.language "css"))
+
+; <style lang="css"> and <style lang="scss">
+((style_element
+  (start_tag
+    (attribute
+      (attribute_name) @_lang
+      (quoted_attribute_value
+        (attribute_value) @injection.language)))
+  (raw_text) @injection.content)
+  (#eq? @_lang "lang")
+  (#any-of? @injection.language "css" "scss"))
+
+((interpolation
+  (raw_text) @injection.content)
+  (#set! injection.language "typescript"))
+
+(directive_attribute
+  (quoted_attribute_value
+    (attribute_value) @injection.content)
+  (#set! injection.language "typescript"))
+"#;
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -46,21 +148,14 @@ impl Command {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Language {
-    #[schemars(example = &["ts", "tsx"])]
     pub(crate) extensions: Vec<String>,
     /// For files without extensions.
-    #[schemars(example = &["Dockerfile"])]
     pub(crate) file_names: Vec<String>,
     pub(crate) lsp_language_id: Option<LanguageId>,
     pub(crate) lsp_command: Option<LspCommand>,
     #[serde(default)]
     pub(crate) lsp_servers: Vec<LspServerConfig>,
     pub(crate) tree_sitter_grammar_config: Option<GrammarConfig>,
-    /// Tree-sitter query describing embedded language regions.
-    pub(crate) injection_query: Option<String>,
-    /// Language configuration keys needed by the injection query.
-    #[serde(default)]
-    pub(crate) injected_languages: Vec<String>,
     /// The formatter command will receive the content from STDIN
     /// and is expected to return the formatted output to STDOUT.
     pub(crate) formatter: Option<Command>,
@@ -246,7 +341,7 @@ impl CargoLinkedTreesitterLanguage {
             CargoLinkedTreesitterLanguage::QmlDir => Some(tree_sitter_qmldir::HIGHLIGHTS_QUERY),
             CargoLinkedTreesitterLanguage::JSX => Some(tree_sitter_javascript::HIGHLIGHT_QUERY),
             CargoLinkedTreesitterLanguage::Svelte => Some(tree_sitter_svelte_ng::HIGHLIGHTS_QUERY),
-            CargoLinkedTreesitterLanguage::Vue => Some(include_str!("queries/vue/highlights.scm")),
+            CargoLinkedTreesitterLanguage::Vue => Some(VUE_HIGHLIGHTS_QUERY),
             CargoLinkedTreesitterLanguage::JSON => Some(tree_sitter_json::HIGHLIGHTS_QUERY),
             CargoLinkedTreesitterLanguage::YAML => Some(tree_sitter_yaml::HIGHLIGHTS_QUERY),
             CargoLinkedTreesitterLanguage::HTML => Some(tree_sitter_html::HIGHLIGHTS_QUERY),
@@ -315,6 +410,13 @@ impl CargoLinkedTreesitterLanguage {
             CargoLinkedTreesitterLanguage::Wit => Some(tree_sitter_wit::HIGHLIGHTS_QUERY),
         }
     }
+
+    fn default_injection_query(&self) -> Option<&'static str> {
+        match self {
+            CargoLinkedTreesitterLanguage::Vue => Some(VUE_INJECTIONS_QUERY),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -335,12 +437,6 @@ pub struct LspServerConfig {
     pub(crate) command: Command,
     pub(crate) language_id: Option<LanguageId>,
     pub(crate) initialization_options: Option<serde_json::Value>,
-    /// Values returned for workspace/configuration requests from this server.
-    pub(crate) settings: Option<serde_json::Value>,
-    /// Root-marker groups in priority order; the nearest match within a group wins.
-    /// An empty list keeps the editor working directory as the server root.
-    #[serde(default)]
-    pub(crate) root_markers: Vec<Vec<String>>,
     #[serde(default)]
     pub(crate) environment: HashMap<String, String>,
     #[serde(default)]
@@ -373,8 +469,6 @@ impl Language {
             lsp_command: None,
             lsp_servers: Vec::new(),
             tree_sitter_grammar_config: None,
-            injection_query: None,
-            injected_languages: Vec::new(),
             formatter: None,
             line_comment_prefix: None,
             block_comment_affixes: None,
@@ -440,10 +534,6 @@ impl Language {
         let (lsp_servers, lsp_servers_error) = extract_field!(lsp_servers, "lsp_servers");
         let (tree_sitter_grammar_config, tree_sitter_grammar_config_error) =
             extract_field!(tree_sitter_grammar_config, "tree_sitter_grammar_config");
-        let (injection_query, injection_query_error) =
-            extract_field!(injection_query, "injection_query");
-        let (injected_languages, injected_languages_error) =
-            extract_field!(injected_languages, "injected_languages");
         let (formatter, formatter_error) = extract_field!(formatter, "formatter");
         let (line_comment_prefix, line_comment_prefix_error) =
             extract_field!(line_comment_prefix, "line_comment_prefix");
@@ -457,8 +547,6 @@ impl Language {
             "lsp_command",
             "lsp_servers",
             "tree_sitter_grammar_config",
-            "injection_query",
-            "injected_languages",
             "formatter",
             "line_comment_prefix",
             "block_comment_affixes",
@@ -475,8 +563,6 @@ impl Language {
             lsp_command,
             lsp_servers,
             tree_sitter_grammar_config,
-            injection_query,
-            injected_languages,
             formatter,
             line_comment_prefix,
             block_comment_affixes,
@@ -489,8 +575,6 @@ impl Language {
             .chain(lsp_command_error)
             .chain(lsp_servers_error)
             .chain(tree_sitter_grammar_config_error)
-            .chain(injection_query_error)
-            .chain(injected_languages_error)
             .chain(formatter_error)
             .chain(line_comment_prefix_error)
             .chain(block_comment_affixes_error)
@@ -508,8 +592,6 @@ impl LspServerConfig {
             command,
             language_id: None,
             initialization_options: None,
-            settings: None,
-            root_markers: Vec::new(),
             environment: HashMap::new(),
             primary: true,
             diagnostics: true,
@@ -527,14 +609,6 @@ impl LspServerConfig {
 
     pub fn initialization_options(&self) -> Option<Value> {
         self.initialization_options.clone()
-    }
-
-    pub fn settings(&self) -> Option<&Value> {
-        self.settings.as_ref()
-    }
-
-    pub fn root_markers(&self) -> &[Vec<String>] {
-        &self.root_markers
     }
 
     pub fn primary(&self) -> bool {
@@ -605,8 +679,6 @@ impl Language {
                     command: command.command.clone(),
                     language_id: self.lsp_language_id.clone(),
                     initialization_options: command.initialization_options.clone(),
-                    settings: None,
-                    root_markers: Vec::new(),
                     environment: command.environment.clone(),
                     primary: true,
                     diagnostics: true,
@@ -706,12 +778,24 @@ impl Language {
         None
     }
 
-    pub fn injection_query(&self) -> Option<&str> {
-        self.injection_query.as_deref()
+    pub fn injection_query(&self) -> Option<&'static str> {
+        let config = self.tree_sitter_grammar_config.as_ref()?;
+        match &config.kind {
+            GrammarConfigKind::CargoLinked(language) => language.default_injection_query(),
+            GrammarConfigKind::FromSource { .. } => None,
+        }
     }
 
-    pub fn injected_language_ids(&self) -> impl Iterator<Item = &str> {
-        self.injected_languages.iter().map(String::as_str)
+    pub fn injected_language_ids(&self) -> Vec<&'static str> {
+        let Some(config) = self.tree_sitter_grammar_config.as_ref() else {
+            return Vec::new();
+        };
+        match &config.kind {
+            GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Vue) => {
+                vec!["javascript", "typescript", "tsx", "jsx", "css", "scss"]
+            }
+            _ => Vec::new(),
+        }
     }
 
     pub fn lsp_process_command(&self) -> Option<ProcessCommand> {

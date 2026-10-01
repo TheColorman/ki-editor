@@ -3229,7 +3229,9 @@ fn pasting_when_clipboard_html_is_set_by_other_app() -> Result<(), anyhow::Error
                     owner: BufferOwner::User,
                     focus: true,
                 }),
-                App(Dispatch::SetSystemClipboardContent { content: "hello" }),
+                App(SetClipboardContent {
+                    copied_texts: Texts::new(NonEmpty::singleton("hello".to_string())),
+                }),
                 Editor(SetSelectionMode(IfCurrentNotFound::LookForward, Character)),
                 Editor(SetContent("".to_string())),
                 Editor(PasteWithMovement(GetGapMovement::Right)),
@@ -3819,7 +3821,6 @@ fn lsp_initialization_should_only_send_relevant_opened_documents() -> anyhow::Re
             App(HandleLspNotification(LspNotification::Initialized {
                 language: Box::new(crate::config::from_extension("ts").unwrap()),
                 server_id: "primary".to_string(),
-                root: s.temp_dir(),
             })),
             Expect(LspServerInitializedArgs(Some((
                 "typescript:primary".to_string(),

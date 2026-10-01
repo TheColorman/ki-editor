@@ -91,7 +91,6 @@
                 "QmlDir",
                 "JSX",
                 "Svelte",
-                "Vue",
                 "JSON",
                 "YAML",
                 "HTML",
@@ -288,18 +287,6 @@
                         }
                     ]
                 },
-                "injected_languages": {
-                    "description": "Language configuration keys needed by the injection query.",
-                    "type": "array",
-                    "default": [],
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "injection_query": {
-                    "description": "Tree-sitter query describing embedded language regions.",
-                    "type": ["string", "null"]
-                },
                 "line_comment_prefix": {
                     "type": ["string", "null"],
                     "examples": ["//"]
@@ -323,13 +310,6 @@
                             "type": "null"
                         }
                     ]
-                },
-                "lsp_servers": {
-                    "type": "array",
-                    "default": [],
-                    "items": {
-                        "$ref": "#/$defs/LspServerConfig"
-                    }
                 },
                 "tree_sitter_grammar_config": {
                     "anyOf": [
@@ -388,67 +368,6 @@
             },
             "additionalProperties": false,
             "required": ["command"]
-        },
-        "LspDiagnosticMode": {
-            "type": "string",
-            "enum": ["push", "pull", "both"]
-        },
-        "LspServerConfig": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "$ref": "#/$defs/Command"
-                },
-                "diagnostic_mode": {
-                    "$ref": "#/$defs/LspDiagnosticMode",
-                    "default": "push"
-                },
-                "diagnostics": {
-                    "type": "boolean",
-                    "default": true
-                },
-                "environment": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "string"
-                    },
-                    "default": {}
-                },
-                "id": {
-                    "type": "string"
-                },
-                "initialization_options": true,
-                "language_id": {
-                    "anyOf": [
-                        {
-                            "$ref": "#/$defs/LanguageId"
-                        },
-                        {
-                            "type": "null"
-                        }
-                    ]
-                },
-                "primary": {
-                    "type": "boolean",
-                    "default": false
-                },
-                "root_markers": {
-                    "description": "Root-marker groups in priority order; the nearest match within a group wins.\nAn empty list keeps the editor working directory as the server root.",
-                    "type": "array",
-                    "default": [],
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "settings": {
-                    "description": "Values returned for workspace/configuration requests from this server."
-                }
-            },
-            "additionalProperties": false,
-            "required": ["id", "command"]
         },
         "Script": {
             "type": "string"

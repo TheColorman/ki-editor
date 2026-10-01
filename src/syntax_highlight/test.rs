@@ -5,62 +5,32 @@ use crate::{
     app::{Dimension, Dispatch::*},
     components::editor::{Direction, DispatchEditor::*},
     grid::{IndexedHighlightGroup, StyleKey},
+    syntax_highlight::HighlightConfigs,
     test_app::{execute_test_custom, ExpectKind::*, RunTestOptions, Step::*},
 };
 
-#[test]
-fn highlights_vue_embedded_languages() -> anyhow::Result<()> {
-    let source = r#"<template><button>{{ count }}</button></template>
-<script lang="ts">const count: number = 42;</script>
-<style>.button { color: red; }</style>
-<style lang="scss">.button { color: $primary; }</style>"#;
-    let spans = super::HighlightConfigs::new().highlight(
-        crate::config::from_extension("vue").unwrap(),
-        source,
-        &std::sync::atomic::AtomicUsize::new(0),
-    )?;
-    for (text, group) in [
-        ("button", "tag"),
-        ("const", "keyword"),
-        ("42", "number"),
-        ("color", "property"),
-        ("$primary", "variable"),
-    ] {
-        let start = source.find(text).unwrap();
-        let style = StyleKey::Syntax(IndexedHighlightGroup::from_str(group).unwrap());
-        assert!(
-            spans.0.iter().any(|span| span.style_key == style
-                && span.byte_range.start <= start
-                && start + text.len() <= span.byte_range.end),
-            "{text} should be {group}"
-        );
-    }
-    Ok(())
-}
+fn assert_substring_highlighted_as(
+    source_code: &str,
+    highlighted_spans: &crate::syntax_highlight::HighlightedSpans,
+    substring: &str,
+    highlight_group: &str,
+) {
+    let start = source_code
+        .find(substring)
+        .unwrap_or_else(|| panic!("substring {substring:?} not found"));
+    let end = start + substring.len();
+    let expected_style =
+        StyleKey::Syntax(IndexedHighlightGroup::from_str(highlight_group).unwrap());
 
-#[test]
-fn highlights_configured_injections() -> anyhow::Result<()> {
-    let source = r##"fn main() { let data = r#"{"answer": 42}"#; }"##;
-    let (language, errors) = shared::language::Language::extract_lenient(
-        &serde_json::json!({
-            "injection_query": "((raw_string_literal (string_content) @injection.content) (#set! injection.language \"json\"))",
-            "injected_languages": ["json"]
+    assert!(
+        highlighted_spans.0.iter().any(|span| {
+            span.style_key == expected_style
+                && span.byte_range.start <= start
+                && end <= span.byte_range.end
         }),
-        &crate::config::from_extension("rs").unwrap(),
+        "expected {substring:?} to be highlighted as {highlight_group:?}; spans: {:?}",
+        highlighted_spans.0
     );
-    assert!(errors.is_empty(), "{errors:?}");
-    let spans = super::HighlightConfigs::new().highlight(
-        language,
-        source,
-        &std::sync::atomic::AtomicUsize::new(0),
-    )?;
-    let start = source.find("42").unwrap();
-    let number = StyleKey::Syntax(IndexedHighlightGroup::from_str("number").unwrap());
-    assert!(spans
-        .0
-        .iter()
-        .any(|span| span.style_key == number && span.byte_range == (start..start + 2)));
-    Ok(())
 }
 
 #[test]
@@ -103,4 +73,40 @@ fn syntax_highlight_json() -> anyhow::Result<()> {
             )),
         ])
     })
+}
+
+#[test]
+fn syntax_highlight_vue_embedded_languages() -> anyhow::Result<()> {
+    let source_code = r#"<template>
+  <button :class="isActive ? 'active' : 'inactive'">{{ count + 1 }}</button>
+</template>
+
+<script setup lang="ts">
+const count: number = 1;
+</script>
+
+<style>
+.button { color: red; }
+</style>
+
+<style lang="scss">
+$theme-color: blue;
+.button { color: $primary; }
+</style>
+"#;
+
+    let mut highlight_configs = HighlightConfigs::new();
+    let highlighted_spans = highlight_configs.highlight(
+        crate::config::from_extension("vue").unwrap(),
+        source_code,
+        &std::sync::atomic::AtomicUsize::new(0),
+    )?;
+
+    assert_substring_highlighted_as(source_code, &highlighted_spans, "button", "tag");
+    assert_substring_highlighted_as(source_code, &highlighted_spans, "const", "keyword");
+    assert_substring_highlighted_as(source_code, &highlighted_spans, "1", "number");
+    assert_substring_highlighted_as(source_code, &highlighted_spans, "color", "property");
+    assert_substring_highlighted_as(source_code, &highlighted_spans, "$primary", "variable");
+
+    Ok(())
 }

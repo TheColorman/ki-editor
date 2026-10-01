@@ -7,7 +7,6 @@ use crate::history::History;
 use crate::lsp::diagnostic::Diagnostic;
 use crate::selection::Selection;
 use crate::selection_mode::naming_convention_agnostic::NamingConventionAgnostic;
-use crate::syntax_highlight::language_from_injection_name;
 use crate::syntax_highlight::SyntaxHighlightRequestBatchId;
 use crate::{
     char_index_range::CharIndexRange,
@@ -29,7 +28,8 @@ use shared::{absolute_path::AbsolutePath, language::Language};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use std::{cell::RefCell, collections::HashMap, ops::Range};
-use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{Node, Parser, Tree};
+use tree_sitter::{Point as TreeSitterPoint, Range as TreeSitterRange};
 #[cfg(test)]
 use tree_sitter_traversal2::{traverse, Order};
 
@@ -93,6 +93,53 @@ struct InjectedSyntaxTree {
 pub(crate) struct SyntaxTreeLayer {
     pub(crate) tree: Tree,
     pub(crate) is_injected: bool,
+}
+
+fn vue_start_tag_lang_attribute(start_tag: Node, source: &str) -> Option<String> {
+    let mut cursor = start_tag.walk();
+    let attributes = start_tag
+        .children(&mut cursor)
+        .filter(|child| child.kind() == "attribute")
+        .collect_vec();
+    attributes.into_iter().find_map(|attribute| {
+        let mut cursor = attribute.walk();
+        let children = attribute.children(&mut cursor).collect_vec();
+        let name = children
+            .iter()
+            .find(|child| child.kind() == "attribute_name")?
+            .utf8_text(source.as_bytes())
+            .ok()?;
+        if name != "lang" {
+            return None;
+        }
+        let quoted_value = children
+            .iter()
+            .find(|child| child.kind() == "quoted_attribute_value")?;
+        let mut cursor = quoted_value.walk();
+        let value = quoted_value
+            .children(&mut cursor)
+            .find(|child| child.kind() == "attribute_value")?
+            .utf8_text(source.as_bytes())
+            .ok()
+            .map(str::to_string);
+        value
+    })
+}
+
+fn language_from_injection_name(name: &str) -> Option<Language> {
+    let language_key = match name {
+        "js" | "javascript" => "javascript",
+        "jsx" => "javascriptreact",
+        "ts" | "typescript" => "typescript",
+        "tsx" => "typescriptreact",
+        "css" => "css",
+        "scss" | "sass" | "less" | "postcss" => "scss",
+        _ => name,
+    };
+    crate::config::AppConfig::singleton()
+        .languages()
+        .get(language_key)
+        .cloned()
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -240,8 +287,7 @@ impl Buffer {
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         self.diagnostics
             .values()
-            .flatten()
-            .cloned()
+            .flat_map(|diagnostics| diagnostics.iter().cloned())
             .sorted_by_key(|diagnostic| diagnostic.range)
             .collect()
     }
@@ -523,7 +569,39 @@ impl Buffer {
         let Some(tree) = self.tree.as_ref() else {
             return Ok(None);
         };
-        self.get_current_node_in_tree(tree, selection, get_largest_end)
+        let range = selection.range();
+        let start = self.char_to_byte(range.start)?;
+        let (start, end) = if get_largest_end {
+            (start, start + 1)
+        } else {
+            (start, self.char_to_byte(range.end)?)
+        };
+        let node = tree
+            .root_node()
+            .descendant_for_byte_range(start, end)
+            .unwrap_or_else(|| tree.root_node());
+
+        // Get the most ancestral node of this range
+        //
+        // This is because sometimes the parent of a node can have the same range as the node
+        // itself.
+        //
+        // If we don't get the most ancestral node, then movements like "go to next sibling" will
+        // not work as expected.
+        let mut result = node;
+        let root_node_id = tree.root_node().id();
+        while let Some(parent) = result.parent() {
+            if parent.start_byte() == node.start_byte()
+                && root_node_id != parent.id()
+                && (get_largest_end || node.end_byte() == parent.end_byte())
+            {
+                result = parent;
+            } else {
+                return Ok(Some(result));
+            }
+        }
+
+        Ok(Some(node))
     }
 
     #[cfg(test)]
@@ -897,14 +975,10 @@ impl Buffer {
         selection: &Selection,
     ) -> anyhow::Result<Option<SyntaxTreeLayer>> {
         let cursor_byte = self.char_to_byte(selection.range().start)?;
-        let end_byte = self.char_to_byte(selection.range().end)?;
         if let Some(injected_tree) = self
             .injected_syntax_trees()?
             .into_iter()
-            .filter(|tree| {
-                tree.byte_range.contains(&cursor_byte) && end_byte <= tree.byte_range.end
-            })
-            .min_by_key(|tree| tree.byte_range.len())
+            .find(|tree| tree.byte_range.contains(&cursor_byte))
         {
             return Ok(Some(SyntaxTreeLayer {
                 tree: injected_tree.tree,
@@ -943,17 +1017,20 @@ impl Buffer {
             .descendant_for_byte_range(start, end)
             .unwrap_or_else(|| tree.root_node());
 
+        let mut result = node;
         let root_node_id = tree.root_node().id();
-        // Prefer the most ancestral node with the same range, so sibling
-        // movements do not get trapped in an identically sized child.
-        Ok(std::iter::successors(Some(node), |node| node.parent())
-            .take_while(|parent| {
-                parent.id() == node.id()
-                    || (parent.start_byte() == node.start_byte()
-                        && root_node_id != parent.id()
-                        && (get_largest_end || node.end_byte() == parent.end_byte()))
-            })
-            .last())
+        while let Some(parent) = result.parent() {
+            if parent.start_byte() == node.start_byte()
+                && root_node_id != parent.id()
+                && (get_largest_end || node.end_byte() == parent.end_byte())
+            {
+                result = parent;
+            } else {
+                return Ok(Some(result));
+            }
+        }
+
+        Ok(Some(node))
     }
 
     fn injected_syntax_trees(&self) -> anyhow::Result<Vec<InjectedSyntaxTree>> {
@@ -973,74 +1050,78 @@ impl Buffer {
     }
 
     fn compute_injected_syntax_trees(&self) -> anyhow::Result<Vec<InjectedSyntaxTree>> {
-        let (Some(host_tree), Some(grammar), Some(query)) = (
-            self.tree.as_ref(),
-            self.treesitter_language.as_ref(),
-            self.language.as_ref().and_then(Language::injection_query),
-        ) else {
+        if self
+            .language
+            .as_ref()
+            .and_then(|language| language.tree_sitter_grammar_id())
+            .as_deref()
+            != Some("vue")
+        {
+            return Ok(Vec::new());
+        }
+        let Some(host_tree) = self.tree.as_ref() else {
             return Ok(Vec::new());
         };
-        let query = Query::new(grammar, query)?;
-        let Some(content_capture) = query.capture_index_for_name("injection.content") else {
-            return Ok(Vec::new());
-        };
-        let language_capture = query.capture_index_for_name("injection.language");
+
         let source = self.rope.to_string();
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&query, host_tree.root_node(), source.as_bytes());
-        let regions = std::iter::from_fn(|| {
-            matches
-                .next()
-                .map(|m| (m.pattern_index, m.captures.to_vec()))
+        let mut injections = Vec::new();
+        self.collect_vue_injected_trees(host_tree.root_node(), &source, &mut injections)?;
+        Ok(injections)
+    }
+
+    fn collect_vue_injected_trees(
+        &self,
+        node: Node,
+        source: &str,
+        result: &mut Vec<InjectedSyntaxTree>,
+    ) -> anyhow::Result<()> {
+        if matches!(node.kind(), "script_element" | "style_element") {
+            if let (Some(language), Some(raw_text)) = (
+                self.vue_injection_language(node, source),
+                node.children(&mut node.walk())
+                    .find(|child| child.kind() == "raw_text"),
+            ) {
+                if let Some(tree) = self.parse_injected_tree(language.as_str(), raw_text)? {
+                    result.push(InjectedSyntaxTree {
+                        byte_range: raw_text.byte_range(),
+                        tree,
+                    });
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_vue_injected_trees(child, source, result)?;
+        }
+        Ok(())
+    }
+
+    fn vue_injection_language(&self, element: Node, source: &str) -> Option<String> {
+        let default = match element.kind() {
+            "script_element" => "javascript",
+            "style_element" => "css",
+            _ => return None,
+        };
+        let lang = element
+            .children(&mut element.walk())
+            .find(|child| child.kind() == "start_tag")
+            .and_then(|start_tag| vue_start_tag_lang_attribute(start_tag, source));
+
+        Some(match (element.kind(), lang.as_deref()) {
+            ("script_element", Some("js")) => "javascript".to_string(),
+            ("script_element", Some("ts")) => "typescript".to_string(),
+            ("script_element", Some("tsx" | "jsx")) => lang.unwrap(),
+            ("style_element", Some("css" | "scss")) => lang.unwrap(),
+            ("style_element", Some("sass" | "less" | "postcss")) => "scss".to_string(),
+            _ => default.to_string(),
         })
-        .flat_map(|(pattern, captures)| {
-            let language = captures
-                .iter()
-                .find(|capture| Some(capture.index) == language_capture)
-                .and_then(|capture| capture.node.utf8_text(source.as_bytes()).ok())
-                .or_else(|| {
-                    query
-                        .property_settings(pattern)
-                        .iter()
-                        .find(|property| property.key.as_ref() == "injection.language")
-                        .and_then(|property| property.value.as_deref())
-                })
-                .map(str::to_string);
-            captures.into_iter().filter_map(move |capture| {
-                (capture.index == content_capture && !capture.node.byte_range().is_empty())
-                    .then(|| language.clone().map(|language| (capture.node, language)))
-                    .flatten()
-            })
-        })
-        // A more specific later pattern overrides an earlier default for
-        // the same region, matching tree-sitter highlight query ordering.
-        .fold(
-            std::collections::BTreeMap::new(),
-            |mut regions, (node, language)| {
-                regions.insert((node.start_byte(), node.end_byte()), (node, language));
-                regions
-            },
-        );
-        regions
-            .into_values()
-            .map(|(node, language)| {
-                self.parse_injected_tree(&language, node, &source)
-                    .map(|tree| {
-                        tree.map(|tree| InjectedSyntaxTree {
-                            byte_range: node.byte_range(),
-                            tree,
-                        })
-                    })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()
-            .map(|trees| trees.into_iter().flatten().collect())
     }
 
     fn parse_injected_tree(
         &self,
         language_name: &str,
         raw_text: Node,
-        source: &str,
     ) -> anyhow::Result<Option<Tree>> {
         let Some(language) = language_from_injection_name(language_name) else {
             return Ok(None);
@@ -1048,10 +1129,26 @@ impl Buffer {
         let Some(tree_sitter_language) = language.tree_sitter_language() else {
             return Ok(None);
         };
+        let included_range = TreeSitterRange {
+            start_byte: raw_text.start_byte(),
+            end_byte: raw_text.end_byte(),
+            start_point: self.byte_to_tree_sitter_point(raw_text.start_byte())?,
+            end_point: self.byte_to_tree_sitter_point(raw_text.end_byte())?,
+        };
+
+        let source = self.rope.to_string();
         let mut parser = Parser::new();
         parser.set_language(&tree_sitter_language)?;
-        parser.set_included_ranges(&[raw_text.range()])?;
+        parser.set_included_ranges(&[included_range])?;
         Ok(parser.parse(source, None))
+    }
+
+    fn byte_to_tree_sitter_point(&self, byte: usize) -> anyhow::Result<TreeSitterPoint> {
+        let row = self.byte_to_line(byte)?;
+        Ok(TreeSitterPoint {
+            row,
+            column: byte.saturating_sub(self.line_to_byte(row)?),
+        })
     }
 
     pub fn line_to_byte(&self, line_index: usize) -> anyhow::Result<usize> {

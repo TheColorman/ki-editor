@@ -7,9 +7,6 @@ use crate::{
 
 use super::{ByteRange, IterBasedSelectionMode, TopNode};
 
-#[cfg(test)]
-mod vue_tests;
-
 pub struct SyntaxNode {
     pub coarse: bool,
 }
@@ -273,23 +270,16 @@ mod test_syntax_node {
 
     use serial_test::serial;
 
-    fn injected_buffer(source: &str) -> Buffer {
-        let (language, errors) = shared::language::Language::extract_lenient(
-            &serde_json::json!({
-                "injection_query": "((raw_string_literal (string_content) @injection.content) (#set! injection.language \"json\"))",
-                "injected_languages": ["json"]
-            }),
-            &crate::config::from_extension("rs").unwrap(),
-        );
-        assert!(errors.is_empty());
+    fn vue_buffer(source: &str) -> Buffer {
+        let language = crate::config::from_extension("vue").unwrap();
         let mut buffer = Buffer::new(language.tree_sitter_language(), source);
         buffer.set_language(language).unwrap();
         buffer
     }
 
     fn select_current_syntax_node_text(source: &str, cursor_text: &str) -> String {
-        let buffer = injected_buffer(source);
-        let start = source[..source.find(cursor_text).unwrap()].chars().count();
+        let buffer = vue_buffer(source);
+        let start = source.find(cursor_text).unwrap();
         let selection =
             Selection::default().set_range((CharIndex(start)..CharIndex(start + 1)).into());
         let selected = super::SyntaxNode { coarse: true }
@@ -329,51 +319,43 @@ mod test_syntax_node {
     }
 
     #[test]
-    fn injection_ranges_follow_unicode_edits() {
-        let source = r##"fn main() { let 你好 = r#"{"count": 1}"#; }"##;
-        let mut buffer = injected_buffer(source);
-        let selection_at = |buffer: &Buffer, text: &str| {
-            let byte = buffer.content().find(text).unwrap();
-            let start = buffer.byte_to_char(byte).unwrap();
-            Selection::default().set_range((start..start + 1).into())
-        };
-        let selection = selection_at(&buffer, "1");
-        assert!(
-            buffer
-                .syntax_tree_layer_for_selection(&selection)
-                .unwrap()
-                .unwrap()
-                .is_injected
-        );
+    fn vue_script_uses_injected_typescript_syntax_nodes() {
+        let source = r#"<template><button>{{ count }}</button></template>
+<script setup lang="ts">
+const count = ref(1);
+</script>
+"#;
 
-        let _ = buffer.update(r##"fn main() { let 你好 = r#"{"longer_name": 42}"#; }"##);
-        let selection = selection_at(&buffer, "42");
-        let layer = buffer
-            .syntax_tree_layer_for_selection(&selection)
-            .unwrap()
-            .unwrap();
-        let node = buffer
-            .get_current_node_in_tree(&layer.tree, &selection, false)
-            .unwrap()
-            .unwrap();
-        assert_eq!(node.utf8_text(buffer.content().as_bytes()).unwrap(), "42");
-
-        let selection =
-            Selection::default().set_range((CharIndex(0)..CharIndex(buffer.len_chars())).into());
-        assert!(
-            !buffer
-                .syntax_tree_layer_for_selection(&selection)
-                .unwrap()
-                .unwrap()
-                .is_injected
+        assert_eq!(
+            select_current_syntax_node_text(source, "count ="),
+            "count = ref(1)"
         );
     }
 
     #[test]
-    fn configured_injection_uses_embedded_nodes_and_preserves_host_nodes() {
-        let source = r##"fn main() { let data = r#"{"answer": 42}"#; }"##;
-        assert_eq!(select_current_syntax_node_text(source, "42"), "42");
-        assert_eq!(select_current_syntax_node_text(source, "data"), "data");
+    fn vue_style_uses_injected_scss_syntax_nodes() {
+        let source = r#"<template><button class="button">{{ count }}</button></template>
+<style lang="scss">
+$theme-color: blue;
+.button { color: $primary; }
+</style>
+"#;
+
+        assert_eq!(
+            select_current_syntax_node_text(source, "color: $"),
+            "color: $primary;"
+        );
+    }
+
+    #[test]
+    fn vue_template_still_uses_host_syntax_nodes() {
+        let source = r#"<template><button>{{ count }}</button></template>
+<script setup lang="ts">
+const count = ref(1);
+</script>
+"#;
+
+        assert_eq!(select_current_syntax_node_text(source, "button"), "button");
     }
 
     #[test]
