@@ -332,6 +332,8 @@ pub struct LspServerConfig {
     pub(crate) command: Command,
     pub(crate) language_id: Option<LanguageId>,
     pub(crate) initialization_options: Option<serde_json::Value>,
+    /// Values returned for workspace/configuration requests from this server.
+    pub(crate) settings: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) environment: HashMap<String, String>,
     #[serde(default)]
@@ -499,6 +501,7 @@ impl LspServerConfig {
             command,
             language_id: None,
             initialization_options: None,
+            settings: None,
             environment: HashMap::new(),
             primary: true,
             diagnostics: true,
@@ -516,6 +519,10 @@ impl LspServerConfig {
 
     pub fn initialization_options(&self) -> Option<Value> {
         self.initialization_options.clone()
+    }
+
+    pub fn settings(&self) -> Option<&Value> {
+        self.settings.as_ref()
     }
 
     pub fn primary(&self) -> bool {
@@ -586,6 +593,7 @@ impl Language {
                     command: command.command.clone(),
                     language_id: self.lsp_language_id.clone(),
                     initialization_options: command.initialization_options.clone(),
+                    settings: None,
                     environment: command.environment.clone(),
                     primary: true,
                     diagnostics: true,
