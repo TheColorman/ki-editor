@@ -66,8 +66,6 @@ use my_proc_macros::{key, NamedVariant};
 use nonempty::NonEmpty;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use shared::language::LanguageId;
 use shared::{absolute_path::AbsolutePath, language::Language};
 use std::{
     any::TypeId,
@@ -1768,7 +1766,10 @@ impl<T: Frontend> App<T> {
 
                 Ok(())
             }
-            LspNotification::Initialized(language) => {
+            LspNotification::Initialized {
+                language,
+                server_id,
+            } => {
                 // Need to notify LSP that the file is opened
                 let opened_documents = self
                     .layout
@@ -1782,11 +1783,12 @@ impl<T: Frontend> App<T> {
                         }
                     })
                     .collect_vec();
-                self.lsp_manager().initialized(*language, opened_documents);
+                self.lsp_manager()
+                    .initialized(*language, server_id, opened_documents);
                 Ok(())
             }
-            LspNotification::PublishDiagnostics(params) => {
-                self.update_diagnostics(
+            LspNotification::PublishDiagnostics { server_id, params } => {
+                self.update_diagnostics_from_source(
                     params
                         .uri
                         .to_file_path()
@@ -1794,6 +1796,7 @@ impl<T: Frontend> App<T> {
                             anyhow::anyhow!("Couldn't convert URI to file path: {:?}", err)
                         })?
                         .try_into()?,
+                    server_id,
                     params.diagnostics,
                 )?;
                 Ok(())
@@ -1880,13 +1883,22 @@ impl<T: Frontend> App<T> {
         path: AbsolutePath,
         diagnostics: Vec<lsp_types::Diagnostic>,
     ) -> anyhow::Result<()> {
+        self.update_diagnostics_from_source(path, "default".to_string(), diagnostics)
+    }
+
+    pub fn update_diagnostics_from_source(
+        &mut self,
+        path: AbsolutePath,
+        source: String,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+    ) -> anyhow::Result<()> {
         let component = self.open_file(&path, BufferOwner::System, false, false)?;
 
         component
             .borrow_mut()
             .editor_mut()
             .buffer_mut()
-            .set_diagnostics(diagnostics);
+            .set_diagnostics(source, diagnostics);
         Ok(())
     }
 
@@ -3348,7 +3360,7 @@ impl<T: Frontend> App<T> {
     }
 
     #[cfg(test)]
-    pub fn lsp_server_initialized_args(&mut self) -> Option<(LanguageId, Vec<AbsolutePath>)> {
+    pub fn lsp_server_initialized_args(&mut self) -> Option<(String, Vec<AbsolutePath>)> {
         self.lsp_manager().lsp_server_initialized_args()
     }
 

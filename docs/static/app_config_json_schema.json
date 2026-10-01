@@ -323,6 +323,13 @@
                         }
                     ]
                 },
+                "lsp_servers": {
+                    "type": "array",
+                    "default": [],
+                    "items": {
+                        "$ref": "#/$defs/LspServerConfig"
+                    }
+                },
                 "tree_sitter_grammar_config": {
                     "anyOf": [
                         {
@@ -380,6 +387,45 @@
             },
             "additionalProperties": false,
             "required": ["command"]
+        },
+        "LspServerConfig": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "$ref": "#/$defs/Command"
+                },
+                "diagnostics": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "environment": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "default": {}
+                },
+                "id": {
+                    "type": "string"
+                },
+                "initialization_options": true,
+                "language_id": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/LanguageId"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                },
+                "primary": {
+                    "type": "boolean",
+                    "default": false
+                }
+            },
+            "additionalProperties": false,
+            "required": ["id", "command"]
         },
         "Script": {
             "type": "string"
