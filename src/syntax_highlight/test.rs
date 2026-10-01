@@ -9,6 +9,36 @@ use crate::{
 };
 
 #[test]
+fn highlights_vue_embedded_languages() -> anyhow::Result<()> {
+    let source = r#"<template><button>{{ count }}</button></template>
+<script lang="ts">const count: number = 42;</script>
+<style>.button { color: red; }</style>
+<style lang="scss">.button { color: $primary; }</style>"#;
+    let spans = super::HighlightConfigs::new().highlight(
+        crate::config::from_extension("vue").unwrap(),
+        source,
+        &std::sync::atomic::AtomicUsize::new(0),
+    )?;
+    for (text, group) in [
+        ("button", "tag"),
+        ("const", "keyword"),
+        ("42", "number"),
+        ("color", "property"),
+        ("$primary", "variable"),
+    ] {
+        let start = source.find(text).unwrap();
+        let style = StyleKey::Syntax(IndexedHighlightGroup::from_str(group).unwrap());
+        assert!(
+            spans.0.iter().any(|span| span.style_key == style
+                && span.byte_range.start <= start
+                && start + text.len() <= span.byte_range.end),
+            "{text} should be {group}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn highlights_configured_injections() -> anyhow::Result<()> {
     let source = r##"fn main() { let data = r#"{"answer": 42}"#; }"##;
     let (language, errors) = shared::language::Language::extract_lenient(

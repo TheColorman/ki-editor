@@ -7,6 +7,9 @@ use crate::{
 
 use super::{ByteRange, IterBasedSelectionMode, TopNode};
 
+#[cfg(test)]
+mod vue_tests;
+
 pub struct SyntaxNode {
     pub coarse: bool,
 }
