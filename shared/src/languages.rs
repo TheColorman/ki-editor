@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use crate::language::{CargoLinkedTreesitterLanguage, GrammarConfigKind};
+use crate::language::{
+    CargoLinkedTreesitterLanguage, GrammarConfigKind, LspDiagnosticMode, LspServerConfig,
+};
 
 use super::language::{Command, GrammarConfig, Language, LanguageId, LspCommand};
 
@@ -781,12 +783,60 @@ fn svelte() -> Language {
 }
 
 fn vue() -> Language {
+    let root_markers = vec![
+        to_vec(&[
+            "pnpm-workspace.yaml",
+            "pnpm-workspace.yml",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "package-lock.json",
+            "bun.lockb",
+            "bun.lock",
+        ]),
+        to_vec(&["package.json"]),
+    ];
+    let settings = json!({
+        "typescript": {"tsdk": "${workspace}/node_modules/typescript/lib", "validate": {"enable": true}},
+        "javascript": {"validate": {"enable": true}},
+        "vtsls": {"tsserver": {"globalPlugins": [{
+            "name": "@vue/typescript-plugin",
+            "location": "${workspace}/node_modules/@vue/typescript-plugin",
+            "languages": ["vue"],
+            "enableForWorkspaceTypeScriptVersions": true
+        }]}}
+    });
     Language {
         injection_query: Some(include_str!("queries/vue/injections.scm").to_string()),
         injected_languages: to_vec(&["javascript", "typescript", "tsx", "jsx", "css", "scss"]),
         extensions: to_vec(&["vue"]),
         formatter: Some(Command::new("prettierd", &[".vue"])),
         lsp_language_id: Some(LanguageId::new("vue")),
+        lsp_servers: vec![
+            LspServerConfig {
+                initialization_options: Some(settings.clone()),
+                settings: Some(settings),
+                root_markers: root_markers.clone(),
+                diagnostic_mode: LspDiagnosticMode::Both,
+                ..LspServerConfig::new("vue", Command::new("vtsls", &["--stdio"]))
+            },
+            LspServerConfig {
+                primary: false,
+                diagnostic_mode: LspDiagnosticMode::Pull,
+                root_markers,
+                settings: Some(json!({"eslint": {
+                    "validate": "on", "run": "onType",
+                    "workingDirectory": {"directory": "${workspace}", "changeProcessCWD": true},
+                    "codeActionOnSave": {"enable": false, "mode": "all"},
+                    "codeAction": {"disableRuleComment": {"enable": true, "location": "separateLine"}, "showDocumentation": {"enable": true}},
+                    "format": false, "quiet": false, "onIgnoredFiles": "off",
+                    "options": {}
+                }})),
+                ..LspServerConfig::new(
+                    "eslint",
+                    Command::new("vscode-eslint-language-server", &["--stdio"]),
+                )
+            },
+        ],
         tree_sitter_grammar_config: Some(GrammarConfig {
             id: "vue".to_string(),
             kind: GrammarConfigKind::CargoLinked(CargoLinkedTreesitterLanguage::Vue),
@@ -1390,6 +1440,23 @@ fn wit() -> Language {
 #[cfg(test)]
 mod test {
     use tree_sitter::Query;
+
+    #[test]
+    fn vue_servers_have_separate_settings_and_diagnostic_modes() {
+        let languages = super::languages();
+        let servers = languages["vue"].lsp_server_configs();
+        assert_eq!(servers.len(), 2);
+        assert!(servers[0].primary());
+        assert_eq!(servers[0].process_command().command(), "vtsls");
+        assert_eq!(
+            servers[0].settings().unwrap()["vtsls"]["tsserver"]["globalPlugins"][0]["name"],
+            "@vue/typescript-plugin"
+        );
+        assert!(!servers[1].primary());
+        assert_eq!(servers[1].diagnostic_mode(), super::LspDiagnosticMode::Pull);
+        assert_eq!(servers[1].settings().unwrap()["eslint"]["validate"], "on");
+        assert!(servers[1].settings().unwrap().get("vtsls").is_none());
+    }
 
     #[test]
     fn vue_and_scss_queries_compile() {
