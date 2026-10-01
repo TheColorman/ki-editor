@@ -11,7 +11,7 @@ use lsp_types::request::{
 use lsp_types::*;
 use my_proc_macros::NamedVariant;
 use shared::absolute_path::AbsolutePath;
-use shared::language::Language;
+use shared::language::{Language, LspServerConfig};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 
@@ -48,6 +48,7 @@ macro_rules! lsp_error {
 }
 struct LspServerProcess {
     language: Language,
+    server_config: LspServerConfig,
     /// `None` once the shutdown sequence has closed the pipe to the LSP server,
     /// so that the server observes EOF on its stdin.
     stdin: Option<process::ChildStdin>,
@@ -91,8 +92,14 @@ struct PendingResponseRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LspNotification {
-    Initialized(Box<Language>),
-    PublishDiagnostics(PublishDiagnosticsParams),
+    Initialized {
+        language: Box<Language>,
+        server_id: String,
+    },
+    PublishDiagnostics {
+        server_id: String,
+        params: PublishDiagnosticsParams,
+    },
     Completion(ResponseContext, Completion),
     Hover(Hover),
     Definition(ResponseContext, GotoDefinitionResponse),
@@ -105,7 +112,9 @@ pub enum LspNotification {
     DocumentSymbols(Symbols),
     WorkspaceSymbols(Symbols),
     CompletionItemResolve(Box<lsp_types::CompletionItem>),
-    Progress { message: String },
+    Progress {
+        message: String,
+    },
     CallHierarchyIncomingCalls(ResponseContext, Vec<lsp_types::CallHierarchyIncomingCall>),
     CallHierarchyOutgoingCalls(ResponseContext, Vec<lsp_types::CallHierarchyOutgoingCall>),
 }
@@ -202,6 +211,7 @@ pub enum FromEditor {
 }
 
 impl FromEditor {
+    #[cfg(test)]
     pub fn variant(&self) -> &'static str {
         self.variant_name()
     }
@@ -209,6 +219,7 @@ impl FromEditor {
 
 pub struct LspServerProcessChannel {
     language: Language,
+    server_config: LspServerConfig,
     sender: Sender<LspServerProcessMessage>,
     is_initialized: bool,
 }
@@ -216,10 +227,16 @@ pub struct LspServerProcessChannel {
 impl LspServerProcessChannel {
     pub fn new(
         language: Language,
+        server_config: LspServerConfig,
         screen_message_sender: crossbeam_channel::Sender<AppMessage>,
         current_working_directory: AbsolutePath,
     ) -> Result<Option<LspServerProcessChannel>, anyhow::Error> {
-        LspServerProcess::start(language, screen_message_sender, current_working_directory)
+        LspServerProcess::start(
+            language,
+            server_config,
+            screen_message_sender,
+            current_working_directory,
+        )
     }
 
     /// Shuts down the underlying LSP server process and blocks until the outcome
@@ -263,7 +280,11 @@ impl LspServerProcessChannel {
 
     pub fn document_did_open(&self, path: AbsolutePath) -> Result<(), anyhow::Error> {
         let content = path.read()?;
-        let Some(language_id) = self.language.id() else {
+        let Some(language_id) = self
+            .server_config
+            .language_id()
+            .or_else(|| self.language.id())
+        else {
             return Ok(());
         };
         self.send(LspServerProcessMessage::FromEditor(
@@ -292,13 +313,11 @@ impl LspServerProcessChannel {
 impl LspServerProcess {
     fn start(
         language: Language,
+        server_config: LspServerConfig,
         app_message_sender: crossbeam_channel::Sender<AppMessage>,
         current_working_directory: AbsolutePath,
     ) -> anyhow::Result<Option<LspServerProcessChannel>> {
-        let process_command = match language.lsp_process_command() {
-            Some(result) => result,
-            None => return Ok(None),
-        };
+        let process_command = server_config.process_command();
 
         let mut process = process_command.spawn()?;
         let stdin = process
@@ -318,6 +337,7 @@ impl LspServerProcess {
         let (sender, receiver) = std::sync::mpsc::channel::<LspServerProcessMessage>();
         let mut lsp_server_process = LspServerProcess {
             language: language.clone(),
+            server_config: server_config.clone(),
             stdin: Some(stdin),
             stdout: Some(stdout),
             stderr: Some(stderr),
@@ -353,6 +373,7 @@ impl LspServerProcess {
 
         Ok(Some(LspServerProcessChannel {
             language,
+            server_config,
             sender,
             is_initialized: false,
         }))
@@ -364,7 +385,7 @@ impl LspServerProcess {
             None,
             InitializeParams {
                 process_id: None,
-                initialization_options: self.language.initialization_options(),
+                initialization_options: self.server_config.initialization_options(),
                 capabilities: ClientCapabilities {
                     workspace: Some(WorkspaceClientCapabilities {
                         apply_edit: Some(true),
@@ -824,7 +845,10 @@ impl LspServerProcess {
 
                         self.app_message_sender
                             .send(AppMessage::LspNotification(Box::new(
-                                LspNotification::Initialized(Box::new(self.language.clone())),
+                                LspNotification::Initialized {
+                                    language: Box::new(self.language.clone()),
+                                    server_id: self.server_config.id().to_string(),
+                                },
                             )))?;
                     }
                     "textDocument/completion" => {
@@ -1076,11 +1100,17 @@ impl LspServerProcess {
                 }
                 match method.as_str() {
                     "textDocument/publishDiagnostics" => {
+                        if !self.server_config.diagnostics() {
+                            return Ok(());
+                        }
                         let params: <lsp_notification!("textDocument/publishDiagnostics") as Notification>::Params =
                             serde_json::from_value(request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?)?;
 
                         self.send_to_app(AppMessage::LspNotification(Box::new(
-                            LspNotification::PublishDiagnostics(params),
+                            LspNotification::PublishDiagnostics {
+                                server_id: self.server_config.id().to_string(),
+                                params,
+                            },
                         )));
                     }
                     "workspace/applyEdit" => {
@@ -1855,10 +1885,7 @@ impl LspServerProcess {
     }
 
     fn lsp_command(&self) -> String {
-        self.language
-            .lsp_process_command()
-            .map(|command| command.to_string())
-            .unwrap_or_default()
+        self.server_config.process_command().to_string()
     }
 
     fn handle_progress_notification(&mut self, params: ProgressParams) {
@@ -2001,6 +2028,10 @@ mod test_lsp_server_process {
 
         let lsp_process = LspServerProcess {
             language: Language::default(),
+            server_config: LspServerConfig::new(
+                "test",
+                shared::language::Command::new("test-lsp", &[]),
+            ),
             stdin: Some(stdin),
             stdout: Some(stdout),
             stderr: Some(stderr),
