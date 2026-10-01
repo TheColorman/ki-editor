@@ -88,32 +88,31 @@ impl Highlight for HighlightConfiguration {
     }
 }
 
-fn collect_highlighted_spans(
-    highlights: impl Iterator<Item = Result<HighlightEvent, tree_sitter_highlight::Error>>,
+fn collect_highlighted_spans<'a>(
+    highlights: impl Iterator<Item = Result<HighlightEvent, tree_sitter_highlight::Error>> + 'a,
 ) -> anyhow::Result<HighlightedSpans> {
-    let (_, highlighted_spans) = highlights.into_iter().try_fold(
-        (Vec::new(), Vec::new()),
-        |(mut highlight_events, mut highlighted_spans), event| -> anyhow::Result<_> {
-            match event? {
-                HighlightEvent::HighlightStart(s) => {
-                    highlight_events.push(s);
-                }
-                HighlightEvent::HighlightEnd => {
-                    highlight_events.pop();
-                }
-                HighlightEvent::Source { start, end } => {
-                    if let Some(highlight) = highlight_events.last() {
-                        let style_key = StyleKey::Syntax(IndexedHighlightGroup::new(highlight.0));
-                        highlighted_spans.push(HighlightedSpan {
-                            byte_range: start..end,
-                            style_key,
-                        });
-                    }
+    let mut highlight_events = vec![];
+    let mut highlighted_spans = vec![];
+
+    for event in highlights {
+        match event? {
+            HighlightEvent::HighlightStart(s) => {
+                highlight_events.push(s);
+            }
+            HighlightEvent::HighlightEnd => {
+                highlight_events.pop();
+            }
+            HighlightEvent::Source { start, end } => {
+                if let Some(highlight) = highlight_events.last() {
+                    let style_key = StyleKey::Syntax(IndexedHighlightGroup::new(highlight.0));
+                    highlighted_spans.push(HighlightedSpan {
+                        byte_range: start..end,
+                        style_key,
+                    });
                 }
             }
-            Ok((highlight_events, highlighted_spans))
-        },
-    )?;
+        }
+    }
 
     debug_assert!(highlighted_spans
         .iter()
@@ -314,7 +313,7 @@ pub(crate) fn language_from_injection_name(name: &str) -> Option<Language> {
         "ts" | "typescript" => "typescript",
         "tsx" => "typescriptreact",
         "css" => "css",
-        "scss" => "scss",
+        "scss" | "sass" | "less" | "postcss" => "scss",
         _ => name,
     };
     crate::config::AppConfig::singleton()

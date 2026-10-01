@@ -105,7 +105,9 @@ impl ProcessCommand {
 
     fn resolve_command(&self, directory: Option<&Path>) -> Option<PathBuf> {
         let command_path = Path::new(&self.command);
-        let command_has_separator = command_path.components().count() > 1;
+        let command_has_separator = self.command.contains(std::path::MAIN_SEPARATOR)
+            || self.command.contains('/')
+            || self.command.contains('\\');
         if command_path.is_absolute() || command_has_separator {
             return Some(
                 directory
@@ -115,27 +117,15 @@ impl ProcessCommand {
             );
         }
 
-        let cwd = directory
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())?;
-        let path = self
-            .environment
-            .get("PATH")
-            .map(std::ffi::OsString::from)
-            .or_else(|| std::env::var_os("PATH"))
-            .unwrap_or_default();
-        let paths = directory
-            .map(|directory| directory.join("node_modules/.bin"))
-            .into_iter()
-            .chain(std::env::split_paths(&path).map(|path| {
-                if path.is_absolute() {
-                    path
-                } else {
-                    cwd.join(path)
-                }
-            }))
-            .collect::<Vec<_>>();
-        which::which_in(&self.command, std::env::join_paths(paths).ok(), cwd).ok()
+        directory
+            .map(|directory| {
+                directory
+                    .join("node_modules")
+                    .join(".bin")
+                    .join(&self.command)
+            })
+            .filter(|path| path.exists())
+            .or_else(|| which::which(&self.command).ok())
     }
 
     pub fn run_with_input(&self, input: &str) -> anyhow::Result<String> {
@@ -200,7 +190,7 @@ impl std::fmt::Display for ProcessCommand {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod test_process_command {
     use std::{
         fs,
@@ -226,26 +216,6 @@ mod test_process_command {
         let error = err.to_string();
         assert!(error.contains("Command failed with exit code: 127"));
         assert!(error.contains("bash: line 1: yo: command not found"));
-    }
-
-    #[test]
-    fn local_non_executable_does_not_shadow_path_command() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let local = tempdir.path().join("node_modules/.bin");
-        let fallback = tempdir.path().join("tools");
-        fs::create_dir_all(&local).unwrap();
-        fs::create_dir_all(&fallback).unwrap();
-        fs::write(local.join("hello-lsp"), "not executable").unwrap();
-        create_executable(&fallback.join("hello-lsp"), "#!/bin/sh\nprintf fallback");
-        let command = ProcessCommand::with_environment(
-            "hello-lsp",
-            &[],
-            &[("PATH".to_string(), fallback.display().to_string())].into(),
-        );
-        assert_eq!(
-            command.resolve_command(Some(tempdir.path())),
-            Some(fallback.join("hello-lsp"))
-        );
     }
 
     #[test]

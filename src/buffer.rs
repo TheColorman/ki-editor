@@ -236,8 +236,7 @@ impl Buffer {
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         self.diagnostics
             .values()
-            .flatten()
-            .cloned()
+            .flat_map(|diagnostics| diagnostics.iter().cloned())
             .sorted_by_key(|diagnostic| diagnostic.range)
             .collect()
     }
@@ -527,7 +526,39 @@ impl Buffer {
         let Some(tree) = self.tree.as_ref() else {
             return Ok(None);
         };
-        self.get_current_node_in_tree(tree, selection, get_largest_end)
+        let range = selection.range();
+        let start = self.char_to_byte(range.start)?;
+        let (start, end) = if get_largest_end {
+            (start, start + 1)
+        } else {
+            (start, self.char_to_byte(range.end)?)
+        };
+        let node = tree
+            .root_node()
+            .descendant_for_byte_range(start, end)
+            .unwrap_or_else(|| tree.root_node());
+
+        // Get the most ancestral node of this range
+        //
+        // This is because sometimes the parent of a node can have the same range as the node
+        // itself.
+        //
+        // If we don't get the most ancestral node, then movements like "go to next sibling" will
+        // not work as expected.
+        let mut result = node;
+        let root_node_id = tree.root_node().id();
+        while let Some(parent) = result.parent() {
+            if parent.start_byte() == node.start_byte()
+                && root_node_id != parent.id()
+                && (get_largest_end || node.end_byte() == parent.end_byte())
+            {
+                result = parent;
+            } else {
+                return Ok(Some(result));
+            }
+        }
+
+        Ok(Some(node))
     }
 
     #[cfg(test)]
@@ -979,17 +1010,20 @@ impl Buffer {
             .descendant_for_byte_range(start, end)
             .unwrap_or_else(|| tree.root_node());
 
+        let mut result = node;
         let root_node_id = tree.root_node().id();
-        // Prefer the most ancestral node with the same range, so sibling
-        // movements do not get trapped in an identically sized child.
-        Ok(std::iter::successors(Some(node), |node| node.parent())
-            .take_while(|parent| {
-                parent.id() == node.id()
-                    || (parent.start_byte() == node.start_byte()
-                        && root_node_id != parent.id()
-                        && (get_largest_end || node.end_byte() == parent.end_byte()))
-            })
-            .last())
+        while let Some(parent) = result.parent() {
+            if parent.start_byte() == node.start_byte()
+                && root_node_id != parent.id()
+                && (get_largest_end || node.end_byte() == parent.end_byte())
+            {
+                result = parent;
+            } else {
+                return Ok(Some(result));
+            }
+        }
+
+        Ok(Some(node))
     }
 
     fn injected_syntax_trees(&self) -> anyhow::Result<Vec<InjectedSyntaxTree>> {
