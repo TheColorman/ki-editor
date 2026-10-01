@@ -3886,6 +3886,7 @@ fn lsp_initialization_should_only_send_relevant_opened_documents() -> anyhow::Re
             App(HandleLspNotification(LspNotification::Initialized {
                 language: Box::new(crate::config::from_extension("ts").unwrap()),
                 server_id: "primary".to_string(),
+                root: s.temp_dir(),
             })),
             Expect(LspServerInitializedArgs(Some((
                 "typescript:primary".to_string(),

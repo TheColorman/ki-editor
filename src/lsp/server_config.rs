@@ -2,6 +2,25 @@ use lsp_types::ConfigurationParams;
 use serde_json::Value;
 use shared::{absolute_path::AbsolutePath, language::LspServerConfig};
 
+pub(super) fn root_for_path(
+    config: &LspServerConfig,
+    path: &AbsolutePath,
+    boundary: &AbsolutePath,
+) -> AbsolutePath {
+    let parent = path.as_ref().parent().unwrap_or(path.as_ref());
+    config
+        .root_markers()
+        .iter()
+        .find_map(|markers| {
+            parent
+                .ancestors()
+                .take_while(|ancestor| ancestor.starts_with(boundary.as_ref()))
+                .find(|ancestor| markers.iter().any(|marker| ancestor.join(marker).exists()))
+                .and_then(|path| path.try_into().ok())
+        })
+        .unwrap_or_else(|| boundary.clone())
+}
+
 /// Expand workspace-relative paths without changing non-string option values.
 pub(super) fn resolve_options(value: Value, root: &AbsolutePath) -> Value {
     match value {
@@ -59,6 +78,33 @@ mod tests {
     use super::*;
     use lsp_types::ConfigurationItem;
     use serde_json::json;
+
+    #[test]
+    fn root_markers_respect_priority_and_boundary() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root: AbsolutePath = tempdir.path().try_into()?;
+        let app = tempdir.path().join("frontend/apps/example");
+        std::fs::create_dir_all(&app)?;
+        std::fs::write(
+            tempdir.path().join("frontend/pnpm-workspace.yaml"),
+            "packages: []",
+        )?;
+        std::fs::write(app.join("package.json"), "{}")?;
+        let path: AbsolutePath = app.join("example.vue").try_into()?;
+        let config: LspServerConfig = serde_json::from_value(json!({
+            "id": "example", "command": {"command": "server", "arguments": []},
+            "root_markers": [["pnpm-workspace.yaml"], ["package.json"]]
+        }))?;
+        assert_eq!(
+            root_for_path(&config, &path, &root).as_ref(),
+            tempdir.path().join("frontend")
+        );
+        let boundary: AbsolutePath = app.as_path().try_into()?;
+        assert_eq!(root_for_path(&config, &path, &boundary), boundary);
+        let legacy = LspServerConfig::new("legacy", shared::language::Command::new("server", &[]));
+        assert_eq!(root_for_path(&legacy, &path, &root), root);
+        Ok(())
+    }
 
     #[test]
     fn configuration_is_scoped_to_the_requesting_server() {

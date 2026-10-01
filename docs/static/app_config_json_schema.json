@@ -431,6 +431,17 @@
                     "type": "boolean",
                     "default": false
                 },
+                "root_markers": {
+                    "description": "Root-marker groups in priority order; the nearest match within a group wins.\nAn empty list keeps the editor working directory as the server root.",
+                    "type": "array",
+                    "default": [],
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
                 "settings": {
                     "description": "Values returned for workspace/configuration requests from this server."
                 }

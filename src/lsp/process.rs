@@ -108,6 +108,7 @@ pub enum LspNotification {
     Initialized {
         language: Box<Language>,
         server_id: String,
+        root: AbsolutePath,
     },
     PublishDiagnostics {
         server_id: String,
@@ -869,6 +870,7 @@ impl LspServerProcess {
                                 LspNotification::Initialized {
                                     language: Box::new(self.language.clone()),
                                     server_id: self.server_config.id().to_string(),
+                                    root: self.current_working_directory.clone(),
                                 },
                             )))?;
                     }
