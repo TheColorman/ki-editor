@@ -531,6 +531,7 @@ mod test_language {
             Ok(())
         }
         run_test_case("hello.rs", "rust")?;
+        run_test_case("hello.vue", "vue")?;
         run_test_case("justfile", "just")?;
         Ok(())
     }
