@@ -88,5 +88,6 @@ tree-sitter-java = "0.23.5"
 tree-sitter-wit = "0.2.0"
 
 [dev-dependencies]
+tempfile.workspace = true
 quickcheck.workspace = true
 quickcheck_macros.workspace = true

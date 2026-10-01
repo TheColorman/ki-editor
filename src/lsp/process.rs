@@ -333,7 +333,7 @@ impl LspServerProcess {
     ) -> anyhow::Result<Option<LspServerProcessChannel>> {
         let process_command = server_config.process_command();
 
-        let mut process = process_command.spawn()?;
+        let mut process = process_command.spawn_in_directory(current_working_directory.as_ref())?;
         let stdin = process
             .stdin
             .take()
