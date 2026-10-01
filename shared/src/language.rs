@@ -334,6 +334,10 @@ pub struct LspServerConfig {
     pub(crate) initialization_options: Option<serde_json::Value>,
     /// Values returned for workspace/configuration requests from this server.
     pub(crate) settings: Option<serde_json::Value>,
+    /// Root-marker groups in priority order; the nearest match within a group wins.
+    /// An empty list keeps the editor working directory as the server root.
+    #[serde(default)]
+    pub(crate) root_markers: Vec<Vec<String>>,
     #[serde(default)]
     pub(crate) environment: HashMap<String, String>,
     #[serde(default)]
@@ -502,6 +506,7 @@ impl LspServerConfig {
             language_id: None,
             initialization_options: None,
             settings: None,
+            root_markers: Vec::new(),
             environment: HashMap::new(),
             primary: true,
             diagnostics: true,
@@ -523,6 +528,10 @@ impl LspServerConfig {
 
     pub fn settings(&self) -> Option<&Value> {
         self.settings.as_ref()
+    }
+
+    pub fn root_markers(&self) -> &[Vec<String>] {
+        &self.root_markers
     }
 
     pub fn primary(&self) -> bool {
@@ -594,6 +603,7 @@ impl Language {
                     language_id: self.lsp_language_id.clone(),
                     initialization_options: command.initialization_options.clone(),
                     settings: None,
+                    root_markers: Vec::new(),
                     environment: command.environment.clone(),
                     primary: true,
                     diagnostics: true,
