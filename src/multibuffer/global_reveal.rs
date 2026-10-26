@@ -115,24 +115,20 @@ impl<T: Frontend> App<T> {
             .quickfix_list()
             .items()
             .iter()
-            .sorted_by_key(|item| item.location().path.clone())
-            .chunk_by(|item| item.location().path.clone())
+            .sorted_by_key(|item| item.path().clone())
+            .chunk_by(|item| item.path().clone())
             .into_iter()
-            .map(|(path, items)| {
-                (
-                    path,
-                    items
-                        .into_iter()
-                        .map(|item| item.location().range)
-                        .collect_vec(),
-                )
-            })
+            .map(|(path, items)| (path, items.into_iter().cloned().collect_vec()))
             .collect_vec();
 
         let files = grouped_ranges
             .into_iter()
-            .map(|(path, ranges)| -> anyhow::Result<_> {
+            .map(|(path, items)| -> anyhow::Result<_> {
                 let editor = self.open_file(&path, BufferOwner::User, true, false)?;
+                let ranges = items
+                    .iter()
+                    .map(|item| item.range_in(&editor.borrow().editor().buffer()))
+                    .collect::<anyhow::Result<_>>()?;
 
                 self.handle_dispatch_editor_custom(
                     DispatchEditor::SetSelectionMode(

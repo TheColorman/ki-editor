@@ -257,7 +257,7 @@ impl<T: Frontend> App<T> {
             .quickfix_list()
             .items()
             .iter()
-            .map(|item| item.location().path.clone())
+            .map(|item| item.path().clone())
             .unique()
             .sorted()
             .collect_vec();

@@ -1150,6 +1150,11 @@ impl<T: Frontend> App<T> {
             Dispatch::RemainOnlyCurrentComponent => self.layout.remain_only_current_component(),
             Dispatch::ToEditor(dispatch_editor) => self.handle_dispatch_editor(dispatch_editor)?,
             Dispatch::GotoLocation(location) => self.go_to_location(&location, true)?,
+            Dispatch::GotoQuickfixLocation(location) => {
+                let editor = self.open_file(location.path(), BufferOwner::System, true, true)?;
+                let resolved = location.resolve(&editor.borrow().editor().buffer())?;
+                self.go_to_location(&resolved, false)?;
+            }
             Dispatch::OpenMoveToIndexPrompt(prior_change) => {
                 self.open_move_to_index_prompt(prior_change)?;
             }
@@ -1768,6 +1773,13 @@ impl<T: Frontend> App<T> {
         let component = Rc::new(RefCell::new(editor));
 
         self.layout.add_suggestive_editor(component.clone());
+
+        let cwd = self.context.current_working_directory().clone();
+        self.context.quickfix_list_mut().resolve_document(
+            path,
+            &component.borrow().editor().buffer(),
+            &cwd,
+        );
 
         if focus {
             self.layout
@@ -4147,6 +4159,7 @@ pub enum Dispatch {
     ToEditor(DispatchEditor),
     RequestDocumentSymbols,
     GotoLocation(Location),
+    GotoQuickfixLocation(crate::quickfix_list::QuickfixLocation),
     OpenMoveToIndexPrompt(Option<PriorChange>),
     SafeQuit,
     QuitNoSave,

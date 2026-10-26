@@ -6,6 +6,7 @@ pub mod documentation;
 pub mod goto_definition_response;
 pub mod hover;
 pub mod manager;
+pub mod position;
 pub mod prepare_rename_response;
 pub mod process;
 mod progress_notification_manager;

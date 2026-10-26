@@ -555,7 +555,10 @@ impl ExpectKind {
                 &app.context()
                     .quickfix_list_items()
                     .iter()
-                    .map(|d| d.location().range)
+                    .map(|d| {
+                        d.range_in(&app.current_component().borrow().editor().buffer())
+                            .unwrap()
+                    })
                     .collect_vec(),
             ),
             ComponentCount(expected) => contextualize(expected, &app.components().len()),

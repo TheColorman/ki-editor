@@ -16,13 +16,13 @@ impl LocalQuickfix {
         let ranges = quickfix_list_items
             .iter()
             .filter_map(|item| {
-                if Some(&item.location().path) != buffer.path().as_ref() {
+                if Some(item.path()) != buffer.path().as_ref() {
                     None
                 } else {
                     Some(
                         super::ByteRange::new(
                             buffer
-                                .char_index_range_to_byte_range(item.location().range)
+                                .char_index_range_to_byte_range(item.range_in(buffer).ok()?)
                                 .ok()?,
                         )
                         .set_info(item.info().clone()),
