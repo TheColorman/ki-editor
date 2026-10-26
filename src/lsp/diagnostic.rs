@@ -1,6 +1,5 @@
-use crate::{
-    buffer::Buffer, char_index_range::CharIndexRange, position::Position, quickfix_list::Location,
-};
+use super::position::EncodedRange;
+use crate::{buffer::Buffer, char_index_range::CharIndexRange, quickfix_list::QuickfixLocation};
 
 use lsp_types::DiagnosticSeverity;
 
@@ -15,11 +14,17 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    pub fn try_from(buffer: &Buffer, value: lsp_types::Diagnostic) -> anyhow::Result<Self> {
+    pub fn try_from(
+        buffer: &Buffer,
+        value: lsp_types::Diagnostic,
+        encoding: &lsp_types::PositionEncodingKind,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
-            range: buffer.position_range_to_char_index_range(
-                &(Position::from(value.range.start)..Position::from(value.range.end)),
-            )?,
+            range: EncodedRange {
+                range: value.range,
+                encoding: encoding.clone(),
+            }
+            .to_char_range(buffer)?,
             message: value.message.clone(),
             severity: value.severity,
             code_description: value.code_description.clone(),
@@ -29,7 +34,7 @@ impl Diagnostic {
                 Some(
                     related_information
                         .into_iter()
-                        .map(DiagnosticRelatedInformation::try_from)
+                        .map(|related| DiagnosticRelatedInformation::new(related, encoding))
                         .collect::<Result<Vec<_>, _>>()?,
                 )
             } else {
@@ -42,16 +47,28 @@ impl Diagnostic {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticRelatedInformation {
-    location: Location,
+    location: QuickfixLocation,
     message: String,
 }
 
-impl TryFrom<lsp_types::DiagnosticRelatedInformation> for DiagnosticRelatedInformation {
-    type Error = anyhow::Error;
-
-    fn try_from(value: lsp_types::DiagnosticRelatedInformation) -> Result<Self, Self::Error> {
+impl DiagnosticRelatedInformation {
+    fn new(
+        value: lsp_types::DiagnosticRelatedInformation,
+        encoding: &lsp_types::PositionEncodingKind,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
-            location: Location::try_from(value.location)?,
+            location: QuickfixLocation::Document {
+                path: value
+                    .location
+                    .uri
+                    .to_file_path()
+                    .map_err(|_| anyhow::anyhow!("Invalid diagnostic URI"))?
+                    .try_into()?,
+                range: EncodedRange {
+                    range: value.location.range,
+                    encoding: encoding.clone(),
+                },
+            },
             message: value.message,
         })
     }

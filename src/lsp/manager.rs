@@ -605,6 +605,11 @@ impl Drop for LspManager {
 }
 
 impl LspManager {
+    #[cfg(test)]
+    pub(crate) fn server_count(&self) -> usize {
+        self.lsp_server_process_channels.len()
+    }
+
     pub fn new(
         sender: crossbeam_channel::Sender<AppMessage>,
         current_working_directory: AbsolutePath,

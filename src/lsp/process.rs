@@ -32,6 +32,7 @@ use super::code_action::CodeAction;
 use super::completion::session::{
     CompletionContext, CompletionResponse as ServerCompletionResponse,
 };
+use super::diagnostics::{DiagnosticLifetime, DiagnosticPublication, DiagnosticSource};
 use super::goto_definition_response::GotoDefinitionResponse;
 use super::hover::Hover;
 use super::manager::LspServerKey;
@@ -94,6 +95,8 @@ fn hint_for_lsp_error(server: &LspServerConfig, message: &str) -> Option<&'stati
 
 struct LspServerProcess {
     language: Language,
+    diagnostic_source: DiagnosticSource,
+    diagnostic_lifetime: DiagnosticLifetime,
     server_config: LspServerConfig,
     stdin: process::ChildStdin,
 
@@ -161,6 +164,7 @@ struct PendingResponseRequest {
     method: String,
     context: ResponseContext,
     path: Option<AbsolutePath>,
+    document_version: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +178,8 @@ pub enum LspNotification {
         server_id: String,
         params: PublishDiagnosticsParams,
     },
+    PublishDiagnosticsFromServer(DiagnosticPublication),
+    DiagnosticsStopped(DiagnosticSource),
     Completion(ServerCompletionResponse),
     Hover(Hover),
     Definition(ResponseContext, GotoDefinitionResponse),
@@ -332,6 +338,7 @@ pub struct LspServerProcessChannel {
 
 impl Drop for LspServerProcessChannel {
     fn drop(&mut self) {
+        self.alive.store(false, Ordering::Release);
         let Some(mut child) = self.child.take() else {
             return;
         };
@@ -507,8 +514,16 @@ impl LspServerProcess {
             .take()
             .ok_or_else(|| anyhow::anyhow!("Unable to obtain stdout"))?;
         let (sender, receiver) = std::sync::mpsc::channel::<LspServerProcessMessage>();
+        let alive = Arc::new(AtomicBool::new(true));
+        let diagnostic_source = DiagnosticSource::server(LspServerKey {
+            language_id: language.id().map(|id| id.to_string()).unwrap_or_default(),
+            server_id: server_config.id().to_string(),
+            root: current_working_directory.clone(),
+        });
         let mut lsp_server_process = LspServerProcess {
             language: language.clone(),
+            diagnostic_source: diagnostic_source.clone(),
+            diagnostic_lifetime: DiagnosticLifetime(alive.clone()),
             server_config: server_config.clone(),
             stdin,
             stdout: Some(stdout),
@@ -542,13 +557,15 @@ impl LspServerProcess {
             return Err(error);
         }
 
-        let alive = Arc::new(AtomicBool::new(true));
         let listener_alive = alive.clone();
         std::thread::spawn(move || {
-            if let Err(err) = lsp_server_process.listen(receiver, app_message_sender) {
+            if let Err(err) = lsp_server_process.listen(receiver, app_message_sender.clone()) {
                 log::error!("Failed to start `lsp_server_process.listen` due to {err:?}");
             }
             listener_alive.store(false, Ordering::Release);
+            let _ = app_message_sender.send(AppMessage::LspNotification(Box::new(
+                LspNotification::DiagnosticsStopped(diagnostic_source),
+            )));
         });
 
         Ok(Some(LspServerProcessChannel {
@@ -1087,6 +1104,7 @@ impl LspServerProcess {
                     method,
                     context: response_context,
                     path,
+                    document_version,
                 } = pending_response_request;
 
                 lsp_info!(
@@ -1164,17 +1182,20 @@ impl LspServerProcess {
                         let Some(path) = path else {
                             return Ok(());
                         };
+                        if document_version.is_some_and(|version| {
+                            self.synchronized_documents
+                                .get(&path)
+                                .map(|document| document.version)
+                                != Some(version)
+                        }) {
+                            return Ok(());
+                        }
                         if let Some(diagnostics) = diagnostics_from_document_diagnostic(payload) {
-                            self.send_to_app(AppMessage::LspNotification(Box::new(
-                                LspNotification::PublishDiagnostics {
-                                    server_id: self.server_config.id().to_string(),
-                                    params: PublishDiagnosticsParams {
-                                        uri: path_buf_to_url(path)?,
-                                        diagnostics,
-                                        version: None,
-                                    },
-                                },
-                            )));
+                            self.publish_diagnostics(PublishDiagnosticsParams {
+                                uri: path_buf_to_url(path)?,
+                                diagnostics,
+                                version: document_version,
+                            });
                         }
                     }
                     "textDocument/definition" => {
@@ -1412,12 +1433,7 @@ impl LspServerProcess {
                         let params: <lsp_notification!("textDocument/publishDiagnostics") as Notification>::Params =
                             serde_json::from_value(request.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?)?;
 
-                        self.send_to_app(AppMessage::LspNotification(Box::new(
-                            LspNotification::PublishDiagnostics {
-                                server_id: self.server_config.id().to_string(),
-                                params,
-                            },
-                        )));
+                        self.publish_diagnostics(params);
                     }
                     "workspace/applyEdit" => {
                         let params: <lsp_request!("workspace/applyEdit") as Request>::Params =
@@ -1714,6 +1730,10 @@ impl LspServerProcess {
             PendingResponseRequest {
                 context,
                 method: R::METHOD.to_string(),
+                document_version: path
+                    .as_ref()
+                    .and_then(|path| self.synchronized_documents.get(path))
+                    .map(|document| document.version),
                 path,
             },
         );
@@ -2538,6 +2558,17 @@ impl LspServerProcess {
             .app_message_sender
             .send(message)
             .map_err(|err| log::error!("Failed to send message to app due to {err}"));
+    }
+
+    fn publish_diagnostics(&self, params: PublishDiagnosticsParams) {
+        self.send_to_app(AppMessage::LspNotification(Box::new(
+            LspNotification::PublishDiagnosticsFromServer(DiagnosticPublication {
+                source: self.diagnostic_source.clone(),
+                params,
+                encoding: self.position_encoding(),
+                lifetime: self.diagnostic_lifetime.clone(),
+            }),
+        )));
     }
 }
 

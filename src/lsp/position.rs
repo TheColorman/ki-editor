@@ -11,6 +11,11 @@ pub struct EncodedRange {
 
 impl EncodedRange {
     pub fn to_char_range(&self, buffer: &Buffer) -> anyhow::Result<CharIndexRange> {
+        anyhow::ensure!(
+            (self.range.start.line, self.range.start.character)
+                <= (self.range.end.line, self.range.end.character),
+            "Reversed LSP diagnostic range"
+        );
         Ok((self.to_char(buffer, self.range.start)?..self.to_char(buffer, self.range.end)?).into())
     }
 

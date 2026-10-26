@@ -1,6 +1,7 @@
 pub mod code_action;
 pub mod completion;
 pub mod diagnostic;
+pub mod diagnostics;
 pub mod documentation;
 
 pub mod goto_definition_response;

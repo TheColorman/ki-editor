@@ -32,6 +32,8 @@ fn did_save_respects_server_capabilities() -> anyhow::Result<()> {
             .spawn()?;
         let file_path: AbsolutePath = std::env::current_dir()?.try_into()?;
         let mut lsp_process = LspServerProcess {
+            diagnostic_source: DiagnosticSource::External("test".into()),
+            diagnostic_lifetime: DiagnosticLifetime::default(),
             language: Language::default(),
             server_config: LspServerConfig::new(
                 "test",

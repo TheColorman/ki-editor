@@ -27,6 +27,8 @@ pub(super) fn process_for_server_requests() -> anyhow::Result<ServerRequestProce
     let (app_sender, app_receiver) = crossbeam_channel::unbounded();
     let (sender, receiver) = mpsc::channel();
     let process = LspServerProcess {
+        diagnostic_source: DiagnosticSource::External("test".into()),
+        diagnostic_lifetime: DiagnosticLifetime::default(),
         language: Language::default(),
         server_config: LspServerConfig::new(
             "test",

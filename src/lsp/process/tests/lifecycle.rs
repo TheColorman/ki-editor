@@ -112,6 +112,8 @@ fn initialized_shutdown_sends_shutdown_and_exit() -> anyhow::Result<()> {
     let (app_sender, _app_receiver) = crossbeam_channel::unbounded();
     let (sender, _receiver) = mpsc::channel();
     let mut lsp_process = LspServerProcess {
+        diagnostic_source: DiagnosticSource::External("test".into()),
+        diagnostic_lifetime: DiagnosticLifetime::default(),
         language: Language::default(),
         server_config: LspServerConfig::new(
             "test",
@@ -181,6 +183,8 @@ fn lsp_should_shutdown_after_too_many_consecutive_errors() -> anyhow::Result<()>
     let stderr = process.stderr.take().unwrap();
 
     let lsp_process = LspServerProcess {
+        diagnostic_source: DiagnosticSource::External("test".into()),
+        diagnostic_lifetime: DiagnosticLifetime::default(),
         language: Language::default(),
         server_config: LspServerConfig::new(
             "test",
