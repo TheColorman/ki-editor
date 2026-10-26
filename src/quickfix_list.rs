@@ -1,4 +1,10 @@
-use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    io::{BufRead, BufReader, Read},
+    ops::Range,
+    rc::Rc,
+};
 
 use itertools::Itertools;
 use lsp_types::DiagnosticSeverity;
@@ -14,6 +20,7 @@ use crate::{
         editor::Movement,
         suggestive_editor::Info,
     },
+    lsp::position::EncodedRange,
     position::Position,
 };
 use shared::absolute_path::AbsolutePath;
@@ -58,7 +65,7 @@ impl QuickfixListItem {
                 .map(|line| line.trim_end_matches(['\n', '\r']).to_string())
                 .unwrap_or_else(|| {
                     self.location
-                        .read_from_buffers(buffers)
+                        .preview(buffers)
                         .unwrap_or_else(|| "[Failed to read file]".to_string())
                         .trim_matches(['\n', '\r'])
                         .to_string()
@@ -67,13 +74,13 @@ impl QuickfixListItem {
         })
         .set_info(self.info.clone())
         .set_group({
-            let path = self.location.path.clone();
+            let path = self.path();
             Some(
                 path.display_relative_to(current_working_directory)
                     .unwrap_or_else(|_| path.display_absolute()),
             )
         })
-        .set_dispatches(Dispatches::one(crate::app::Dispatch::GotoLocation(
+        .set_dispatches(Dispatches::one(crate::app::Dispatch::GotoQuickfixLocation(
             self.location.to_owned(),
         )))
         .set_rank(Some(Box::new([line, column])))
@@ -188,11 +195,7 @@ impl QuickfixList {
         let items_with_position_range = items
             .iter()
             .filter_map(|item| {
-                let buffer = self.buffers.get(&item.location.path)?;
-                let position_range = buffer
-                    .borrow()
-                    .char_index_range_to_position_range(item.location.range)
-                    .ok()?;
+                let position_range = item.location.position_range(&self.buffers)?;
                 Some((position_range, item))
             })
             .collect_vec();
@@ -218,9 +221,7 @@ impl QuickfixList {
         .count();
         let dropdown_items = items_with_position_range
             .iter()
-            .chunk_by(|(position_range, item)| {
-                (position_range.start.line, item.location.path.clone())
-            })
+            .chunk_by(|(position_range, item)| (position_range.start.line, item.path().clone()))
             .into_iter()
             .flat_map(|(_, items)| {
                 items
@@ -252,7 +253,7 @@ impl QuickfixList {
             .items
             .drain(..)
             .filter_map(|item| {
-                if &item.location().path == path {
+                if item.path() == path {
                     edits
                         .iter()
                         .try_fold(item, |item, edit| item.apply_edit(edit))
@@ -289,7 +290,10 @@ impl QuickfixList {
         // Extend the buffers cache with new paths
         for path in items
             .iter()
-            .map(|item| &item.location().path)
+            .filter_map(|item| match &item.location {
+                QuickfixLocation::Characters(location) => Some(&location.path),
+                QuickfixLocation::Document { .. } => None,
+            })
             .unique_by(|path| path.try_display_relative_to(current_working_directory))
         {
             self.buffers.entry(path.clone()).or_insert_with(|| {
@@ -316,6 +320,28 @@ impl QuickfixList {
     pub fn dropdown_items(&self) -> Vec<DropdownItem> {
         self.dropdown.items()
     }
+
+    /// Resolve deferred entries before edits start moving character-index ranges.
+    pub fn resolve_document(&mut self, path: &AbsolutePath, buffer: &Buffer, cwd: &AbsolutePath) {
+        if !self.items.iter().any(|item| matches!(item.location(), QuickfixLocation::Document { path: p, .. } if p == path)) {
+            return;
+        }
+        let items = self
+            .items
+            .iter()
+            .cloned()
+            .filter_map(|mut item| {
+                if item.path() == path {
+                    item.location =
+                        QuickfixLocation::Characters(item.location.resolve(buffer).ok()?);
+                }
+                Some(item)
+            })
+            .collect();
+        let index = self.current_index();
+        self.set_items(items, cwd);
+        self.set_current_item_index(index);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,7 +354,7 @@ pub struct QuickfixListItem {
     /// it also avoid an issues where sometimes the location of a file   
     /// cannot be query, which happens frequently when we made global search async.   
     line: Option<String>,
-    location: Location,
+    location: QuickfixLocation,
     info: Option<Info>,
 }
 
@@ -347,7 +373,7 @@ impl Ord for QuickfixListItem {
 impl From<Location> for QuickfixListItem {
     fn from(value: Location) -> Self {
         QuickfixListItem {
-            location: value,
+            location: QuickfixLocation::Characters(value),
             info: None,
             line: None,
         }
@@ -357,14 +383,30 @@ impl From<Location> for QuickfixListItem {
 impl QuickfixListItem {
     pub fn new(location: Location, info: Option<Info>, line: Option<String>) -> QuickfixListItem {
         QuickfixListItem {
-            location,
+            location: QuickfixLocation::Characters(location),
             info,
             line,
         }
     }
 
-    pub fn location(&self) -> &Location {
+    pub fn location(&self) -> &QuickfixLocation {
         &self.location
+    }
+
+    pub fn document(path: AbsolutePath, range: EncodedRange, info: Option<Info>) -> Self {
+        Self {
+            location: QuickfixLocation::Document { path, range },
+            info,
+            line: None,
+        }
+    }
+
+    pub fn path(&self) -> &AbsolutePath {
+        self.location.path()
+    }
+
+    pub fn range_in(&self, buffer: &Buffer) -> anyhow::Result<CharIndexRange> {
+        Ok(self.location.resolve(buffer)?.range)
     }
 
     pub fn info(&self) -> &Option<Info> {
@@ -374,6 +416,109 @@ impl QuickfixListItem {
     #[cfg(test)]
     pub fn set_info(self, info: Option<Info>) -> Self {
         Self { info, ..self }
+    }
+}
+
+/// Wire positions do not require loading a file. Character offsets are used once
+/// a document is open, so the existing edit tracking continues to apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuickfixLocation {
+    Characters(Location),
+    Document {
+        path: AbsolutePath,
+        range: EncodedRange,
+    },
+}
+
+impl QuickfixLocation {
+    pub fn path(&self) -> &AbsolutePath {
+        match self {
+            Self::Characters(location) => &location.path,
+            Self::Document { path, .. } => path,
+        }
+    }
+
+    pub fn resolve(&self, buffer: &Buffer) -> anyhow::Result<Location> {
+        Ok(match self {
+            Self::Characters(location) => location.clone(),
+            Self::Document { path, range } => Location {
+                path: path.clone(),
+                range: range.to_char_range(buffer)?,
+            },
+        })
+    }
+
+    fn position_range(
+        &self,
+        buffers: &HashMap<AbsolutePath, Rc<RefCell<Buffer>>>,
+    ) -> Option<Range<Position>> {
+        match self {
+            Self::Characters(location) => buffers
+                .get(&location.path)?
+                .borrow()
+                .char_index_range_to_position_range(location.range)
+                .ok(),
+            Self::Document { range, .. } => Some(range.range.start.into()..range.range.end.into()),
+        }
+    }
+
+    fn preview(&self, buffers: &HashMap<AbsolutePath, Rc<RefCell<Buffer>>>) -> Option<String> {
+        match self {
+            Self::Characters(location) => location.read_from_buffers(buffers),
+            Self::Document { path, range } => {
+                // Never allocate a full source file (or an unbounded source line)
+                // just to show a diagnostic in the picker.
+                let mut reader = BufReader::new(std::fs::File::open(path).ok()?);
+                for _ in 0..range.range.start.line {
+                    if reader.skip_until(b'\n').ok()? == 0 {
+                        return None;
+                    }
+                }
+                let mut line = Vec::new();
+                reader.take(1024).read_until(b'\n', &mut line).ok()?;
+                Some(String::from_utf8_lossy(&line).into_owned())
+            }
+        }
+    }
+
+    fn apply_edit(self, edit: &crate::edit::Edit) -> Option<Self> {
+        match self {
+            Self::Characters(location) => Some(Self::Characters(location.apply_edit(edit)?)),
+            // Deferred locations are resolved when the document is opened.
+            Self::Document { .. } => Some(self),
+        }
+    }
+}
+
+impl PartialOrd for QuickfixLocation {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for QuickfixLocation {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.path()
+            .cmp(other.path())
+            .then_with(|| match (self, other) {
+                (Self::Characters(left), Self::Characters(right)) => left.cmp(right),
+                (Self::Document { range: left, .. }, Self::Document { range: right, .. }) => (
+                    left.range.start.line,
+                    left.range.start.character,
+                    left.range.end.line,
+                    left.range.end.character,
+                    left.encoding.as_str(),
+                )
+                    .cmp(&(
+                        right.range.start.line,
+                        right.range.start.character,
+                        right.range.end.line,
+                        right.range.end.character,
+                        right.encoding.as_str(),
+                    )),
+                (Self::Characters(_), Self::Document { .. }) => std::cmp::Ordering::Less,
+                (Self::Document { .. }, Self::Characters(_)) => std::cmp::Ordering::Greater,
+            })
     }
 }
 
@@ -432,10 +577,10 @@ impl PartialOrd for Location {
 
 impl Ord for Location {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (&self.path, self.range.start, self.range.start).cmp(&(
+        (&self.path, self.range.start, self.range.end).cmp(&(
             &other.path,
             other.range.start,
-            other.range.start,
+            other.range.end,
         ))
     }
 }
@@ -497,36 +642,67 @@ mod test_quickfix_list {
         test_app::{execute_test, ExpectKind::*, Step::*},
     };
 
-    use super::{Location, QuickfixList, QuickfixListItem};
+    use super::{Location, QuickfixList, QuickfixListItem, QuickfixLocation};
     use itertools::Itertools;
     use pretty_assertions::assert_eq;
     use shared::absolute_path::AbsolutePath;
+
+    #[test]
+    fn deferred_entries_do_not_cache_source_buffers() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path: AbsolutePath = temp.path().join("large.cs").try_into()?;
+        std::fs::write(&path, format!("header\n{}", "x".repeat(1024 * 1024)))?;
+        let item = QuickfixListItem::document(
+            path.clone(),
+            crate::lsp::position::EncodedRange {
+                range: lsp_types::Range::new(
+                    lsp_types::Position::new(1, 0),
+                    lsp_types::Position::new(1, 1),
+                ),
+                encoding: lsp_types::PositionEncodingKind::UTF16,
+            },
+            None,
+        );
+        let mut list = QuickfixList::default();
+        list.set_items(vec![item.clone()], &temp.path().try_into()?);
+        assert!(list.buffers.is_empty());
+        assert_eq!(list.items_count(), 1);
+        assert_eq!(item.location.preview(&list.buffers).unwrap().len(), 1024);
+        let buffer = crate::buffer::Buffer::new(None, "header\nhello");
+        assert_eq!(item.range_in(&buffer)?, (CharIndex(7)..CharIndex(8)).into());
+        list.resolve_document(&path, &buffer, &temp.path().try_into()?);
+        assert!(matches!(
+            list.items()[0].location(),
+            QuickfixLocation::Characters(_)
+        ));
+        Ok(())
+    }
 
     #[test]
     fn should_sort_items() {
         let git_ignore_path: AbsolutePath = ".gitignore".try_into().unwrap();
         let readme_path: AbsolutePath = "README.md".try_into().unwrap();
         let foo = QuickfixListItem {
-            location: Location {
+            location: QuickfixLocation::Characters(Location {
                 path: git_ignore_path.clone(),
                 range: (CharIndex(2)..CharIndex(3)).into(),
-            },
+            }),
             info: None,
             line: None,
         };
         let bar = QuickfixListItem {
-            location: Location {
+            location: QuickfixLocation::Characters(Location {
                 path: readme_path.clone(),
                 range: (CharIndex(1)..CharIndex(2)).into(),
-            },
+            }),
             info: None,
             line: None,
         };
         let spam = QuickfixListItem {
-            location: Location {
+            location: QuickfixLocation::Characters(Location {
                 path: git_ignore_path.clone(),
                 range: (CharIndex(1)..CharIndex(2)).into(),
-            },
+            }),
             info: None,
             line: None,
         };
@@ -543,18 +719,18 @@ mod test_quickfix_list {
         let readme_path: AbsolutePath = "README.md".try_into().unwrap();
         let items = [
             QuickfixListItem {
-                location: Location {
+                location: QuickfixLocation::Characters(Location {
                     path: readme_path.clone(),
                     range: (CharIndex(1)..CharIndex(2)).into(),
-                },
+                }),
                 info: Some(Info::new("Title 1".to_string(), "spongebob".to_string())),
                 line: None,
             },
             QuickfixListItem {
-                location: Location {
+                location: QuickfixLocation::Characters(Location {
                     path: readme_path.clone(),
                     range: (CharIndex(1)..CharIndex(2)).into(),
-                },
+                }),
                 info: Some(Info::new("Title 2".to_string(), "squarepants".to_string())),
                 line: None,
             },
@@ -567,10 +743,10 @@ mod test_quickfix_list {
         assert_eq!(
             quickfix_list.items(),
             &vec![QuickfixListItem {
-                location: Location {
+                location: QuickfixLocation::Characters(Location {
                     path: "README.md".try_into().unwrap(),
                     range: (CharIndex(1)..CharIndex(2)).into(),
-                },
+                }),
                 info: Some(Info::new(
                     "Title 1".to_string(),
                     ["spongebob", "squarepants"].join("\n==========\n")
@@ -742,10 +918,10 @@ src/foo.rs
         assert_eq!(match_positions.len(), 6);
 
         let item_at = |start: usize| QuickfixListItem {
-            location: Location {
+            location: QuickfixLocation::Characters(Location {
                 path: path.clone(),
                 range: (CharIndex(start)..CharIndex(start + "aslmlkm".len())).into(),
-            },
+            }),
             info: None,
             line: None,
         };
