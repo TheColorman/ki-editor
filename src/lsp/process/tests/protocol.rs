@@ -1,4 +1,60 @@
 use super::super::*;
+
+#[test]
+fn pull_diagnostics_keep_document_versions_and_ignore_obsolete_responses() -> anyhow::Result<()> {
+    let (mut process, mut child, app_receiver, _, _, _temp, _) =
+        super::support::process_for_server_requests()?;
+    let path: AbsolutePath = std::env::current_dir()?.join("file.cs").try_into()?;
+    process.synchronized_documents.insert(
+        path.clone(),
+        SynchronizedDocument {
+            content: "abc".into(),
+            version: 1,
+        },
+    );
+    let request = DocumentDiagnosticParams {
+        text_document: TextDocumentIdentifier {
+            uri: path.to_url().unwrap(),
+        },
+        identifier: None,
+        previous_result_id: None,
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    process.send_request::<lsp_request!("textDocument/diagnostic")>(
+        ResponseContext::default(),
+        Some(path.clone()),
+        request.clone(),
+    )?;
+    process
+        .synchronized_documents
+        .get_mut(&path)
+        .unwrap()
+        .version = 2;
+    process.handle_reply(
+        serde_json::json!({ "jsonrpc": "2.0", "id": 0, "result": { "kind": "full", "items": [] } }),
+    )?;
+    assert!(app_receiver.try_recv().is_err());
+    process.send_request::<lsp_request!("textDocument/diagnostic")>(
+        ResponseContext::default(),
+        Some(path),
+        request,
+    )?;
+    process.handle_reply(
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": { "kind": "full", "items": [] } }),
+    )?;
+    let AppMessage::LspNotification(notification) = app_receiver.try_recv()? else {
+        panic!("Expected diagnostics");
+    };
+    let LspNotification::PublishDiagnosticsFromServer(publication) = *notification else {
+        panic!("Expected server diagnostics");
+    };
+    assert_eq!(publication.params.version, Some(2));
+    assert_eq!(publication.encoding, PositionEncodingKind::UTF16);
+    drop(process);
+    child.wait()?;
+    Ok(())
+}
 use super::support::{process_for_server_requests, read_json_rpc_messages};
 
 #[test]

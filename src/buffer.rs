@@ -66,7 +66,7 @@ pub struct Buffer {
     editor_config: EditorConfigSettings,
     path: Option<AbsolutePath>,
     highlighted_spans: HighlightedSpans,
-    diagnostics: HashMap<String, Vec<Diagnostic>>,
+    diagnostics: HashMap<crate::lsp::diagnostics::DiagnosticSource, BufferDiagnostics>,
     decorations: Vec<Decoration>,
     selection_set_history: History<SelectionSet>,
 
@@ -93,6 +93,13 @@ pub struct Buffer {
 struct CachedHunks {
     hunks: Vec<SimpleHunk>,
     file_content: Rope,
+}
+
+#[derive(Clone, PartialEq)]
+struct BufferDiagnostics {
+    encoding: lsp_types::PositionEncodingKind,
+    diagnostics: Vec<Diagnostic>,
+    lifetime: crate::lsp::diagnostics::DiagnosticLifetime,
 }
 
 #[derive(Debug, Clone)]
@@ -350,18 +357,87 @@ impl Buffer {
         conflicts
     }
 
-    pub fn set_diagnostics(&mut self, source: String, diagnostics: Vec<lsp_types::Diagnostic>) {
-        let diagnostics = diagnostics
+    pub fn set_diagnostics(
+        &mut self,
+        source: crate::lsp::diagnostics::DiagnosticSource,
+        snapshot: crate::lsp::diagnostics::DiagnosticSnapshot,
+    ) -> bool {
+        if !snapshot.lifetime.is_active()
+            || snapshot
+                .version
+                .is_some_and(|version| version != self.lsp_document_version())
+        {
+            return false;
+        }
+        let diagnostics: Vec<_> = snapshot
+            .diagnostics
             .into_iter()
-            .filter_map(|diagnostic| Diagnostic::try_from(self, diagnostic).ok())
+            .filter_map(|diagnostic| {
+                Diagnostic::try_from(self, diagnostic, &snapshot.encoding).ok()
+            })
             .collect();
+        if diagnostics.is_empty() {
+            return self.diagnostics.remove(&source).is_some();
+        }
+        let diagnostics = BufferDiagnostics {
+            diagnostics,
+            encoding: snapshot.encoding,
+            lifetime: snapshot.lifetime,
+        };
+        if self.diagnostics.get(&source) == Some(&diagnostics) {
+            return false;
+        }
         self.diagnostics.insert(source, diagnostics);
+        true
+    }
+
+    pub fn clear_diagnostic_source(&mut self, source: &crate::lsp::diagnostics::DiagnosticSource) {
+        self.diagnostics.remove(source);
+    }
+
+    pub fn diagnostic_snapshots(
+        &self,
+    ) -> HashMap<
+        crate::lsp::diagnostics::DiagnosticSource,
+        crate::lsp::diagnostics::DiagnosticSnapshot,
+    > {
+        self.diagnostics
+            .iter()
+            .filter(|(_, set)| set.lifetime.is_active())
+            .map(|(source, set)| {
+                let diagnostics = set
+                    .diagnostics
+                    .iter()
+                    .filter_map(|diagnostic| {
+                        let mut value = diagnostic.original_value.clone()?;
+                        value.range = crate::lsp::position::EncodedRange::from_char_range(
+                            self,
+                            diagnostic.range,
+                            set.encoding.clone(),
+                        )
+                        .ok()?
+                        .range;
+                        Some(value)
+                    })
+                    .collect();
+                (
+                    source.clone(),
+                    crate::lsp::diagnostics::DiagnosticSnapshot {
+                        diagnostics,
+                        version: None,
+                        encoding: set.encoding.clone(),
+                        lifetime: set.lifetime.clone(),
+                    },
+                )
+            })
+            .collect()
     }
 
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         self.diagnostics
-            .values()
-            .flat_map(|diagnostics| diagnostics.iter().cloned())
+            .iter()
+            .filter(|(_, set)| set.lifetime.is_active())
+            .flat_map(|(_, set)| set.diagnostics.iter().cloned())
             .sorted_by_key(|diagnostic| diagnostic.range)
             .collect()
     }
@@ -820,8 +896,8 @@ impl Buffer {
         let dispatches = self.flag_as_modified();
 
         // Update all the non-positional spans
-        self.diagnostics.retain(|_, diagnostics| {
-            diagnostics.retain_mut(|diagnostic| {
+        self.diagnostics.retain(|_, set| {
+            set.diagnostics.retain_mut(|diagnostic| {
                 if let Some(range) = diagnostic.range.apply_edit(edit) {
                     diagnostic.range = range;
                     true
@@ -829,7 +905,7 @@ impl Buffer {
                     false
                 }
             });
-            !diagnostics.is_empty()
+            !set.diagnostics.is_empty()
         });
         let max_char_index = CharIndex(self.len_chars());
         self.selection_set_history = std::mem::take(&mut self.selection_set_history)

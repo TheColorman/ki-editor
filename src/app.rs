@@ -112,6 +112,8 @@ pub struct App<T: Frontend> {
     /// so that the LSPs functionalities still work when user change the working directory
     lsp_manager: HashMap<PathBuf, LspManager>,
     enable_lsp: bool,
+    diagnostic_store: crate::lsp::diagnostics::DiagnosticStore,
+    diagnostic_quickfix_severity: Option<crate::quickfix_list::DiagnosticSeverityRange>,
 
     global_title: Option<String>,
 
@@ -288,6 +290,8 @@ impl<T: Frontend> App<T> {
             queued_events: Vec::new(),
             file_watcher_input_sender,
             multibuffer: None,
+            diagnostic_store: crate::lsp::diagnostics::DiagnosticStore::default(),
+            diagnostic_quickfix_severity: None,
         };
 
         app.restore_session();
@@ -1408,7 +1412,15 @@ impl<T: Frontend> App<T> {
     }
 
     fn close_current_window(&mut self) -> anyhow::Result<()> {
+        let closed_buffer = self.current_component().borrow().editor().buffer_rc();
         if let Some(removed_path) = self.layout.close_current_window(&self.context) {
+            let buffer = closed_buffer.borrow();
+            if !buffer.dirty(&self.context) {
+                for (source, snapshot) in buffer.diagnostic_snapshots() {
+                    self.diagnostic_store
+                        .replace(removed_path.clone(), source, snapshot);
+                }
+            }
             if let Err(error) = self.lsp_manager().send_message(
                 removed_path.clone(),
                 FromEditor::TextDocumentDidClose {
@@ -1423,6 +1435,7 @@ impl<T: Frontend> App<T> {
             if let Some(path) = self.context.unmark_path(removed_path).cloned() {
                 self.open_file(&path, BufferOwner::User, true, true)?;
             }
+            self.refresh_diagnostic_quickfix();
         }
         Ok(())
     }
@@ -1758,6 +1771,9 @@ impl<T: Frontend> App<T> {
 
         let mut buffer = Buffer::from_path(path, true)?;
         buffer.set_owner(owner);
+        for (source, snapshot) in self.diagnostic_store.take(path) {
+            buffer.set_diagnostics(source, snapshot);
+        }
 
         let language = buffer.language();
         let content = buffer.content();
@@ -1807,6 +1823,18 @@ impl<T: Frontend> App<T> {
     pub fn handle_lsp_notification(&mut self, notification: LspNotification) -> anyhow::Result<()> {
         self.invalidate_stale_completion();
         match notification {
+            LspNotification::PublishDiagnosticsFromServer(publication) => {
+                self.publish_diagnostics(publication)?;
+                Ok(())
+            }
+            LspNotification::DiagnosticsStopped(source) => {
+                self.diagnostic_store.clear_source(&source);
+                for buffer in self.layout.buffers() {
+                    buffer.borrow_mut().clear_diagnostic_source(&source);
+                }
+                self.refresh_diagnostic_quickfix();
+                Ok(())
+            }
             LspNotification::Hover(hover) => self.show_editor_info(Info::new(
                 "Hover Info".to_string(),
                 hover.contents.join("\n\n"),
@@ -2028,14 +2056,59 @@ impl<T: Frontend> App<T> {
         source: String,
         diagnostics: Vec<lsp_types::Diagnostic>,
     ) -> anyhow::Result<()> {
-        let component = self.open_file(&path, BufferOwner::System, false, false)?;
-
-        component
-            .borrow_mut()
-            .editor_mut()
-            .buffer_mut()
-            .set_diagnostics(source, diagnostics);
+        self.store_diagnostics(
+            path,
+            crate::lsp::diagnostics::DiagnosticSource::External(source),
+            crate::lsp::diagnostics::DiagnosticSnapshot::external(diagnostics),
+        );
         Ok(())
+    }
+
+    fn publish_diagnostics(
+        &mut self,
+        publication: crate::lsp::diagnostics::DiagnosticPublication,
+    ) -> anyhow::Result<bool> {
+        let path: AbsolutePath = publication.params.uri.try_into()?;
+        if !path.is_file() {
+            return Ok(false);
+        }
+        Ok(self.store_diagnostics(
+            path,
+            publication.source,
+            crate::lsp::diagnostics::DiagnosticSnapshot {
+                diagnostics: publication.params.diagnostics,
+                version: publication.params.version,
+                encoding: publication.encoding,
+                lifetime: publication.lifetime,
+            },
+        ))
+    }
+
+    fn store_diagnostics(
+        &mut self,
+        path: AbsolutePath,
+        source: crate::lsp::diagnostics::DiagnosticSource,
+        snapshot: crate::lsp::diagnostics::DiagnosticSnapshot,
+    ) -> bool {
+        let changed = if let Some(editor) = self.layout.get_existing_editor(&path) {
+            editor
+                .borrow_mut()
+                .editor_mut()
+                .buffer_mut()
+                .set_diagnostics(source, snapshot)
+        } else {
+            self.diagnostic_store.replace(path, source, snapshot)
+        };
+        if changed && self.context.mode() == Some(GlobalMode::QuickfixListItem) {
+            self.refresh_diagnostic_quickfix();
+        }
+        changed
+    }
+
+    fn refresh_diagnostic_quickfix(&mut self) {
+        if let Some(severity) = self.diagnostic_quickfix_severity {
+            self.update_quickfix_list_item(QuickfixListType::Diagnostic(severity));
+        }
     }
 
     pub fn goto_quickfix_list_item(&mut self, movement: Movement) -> anyhow::Result<()> {
@@ -2138,6 +2211,10 @@ impl<T: Frontend> App<T> {
 
     /// Returns the items length
     pub fn update_quickfix_list_item(&mut self, r#type: QuickfixListType) -> usize {
+        self.diagnostic_quickfix_severity = match &r#type {
+            QuickfixListType::Diagnostic(severity) => Some(*severity),
+            _ => None,
+        };
         let (kind, source) = match r#type {
             QuickfixListType::Diagnostic(severity_range) => {
                 (None, QuickfixListSource::Diagnostic(severity_range))
@@ -2146,7 +2223,10 @@ impl<T: Frontend> App<T> {
             QuickfixListType::Mark => (Some(QuickfixListKind::Mark), QuickfixListSource::Mark),
         };
 
-        let items = self.layout.get_quickfix_list_items(&source, &self.context);
+        let mut items = self.layout.get_quickfix_list_items(&source, &self.context);
+        if let QuickfixListSource::Diagnostic(severity) = source {
+            items.extend(self.diagnostic_store.quickfix_items(severity));
+        }
 
         let length = items.len();
 
@@ -2398,6 +2478,7 @@ impl<T: Frontend> App<T> {
                 std::fs::remove_file(&path)?;
             }
             self.layout.remove_suggestive_editor(&path);
+            self.diagnostic_store.remove_path(&path);
         }
         self.layout.refresh_file_explorer(&self.context)?;
         Ok(())
@@ -2426,6 +2507,7 @@ impl<T: Frontend> App<T> {
         use std::fs;
         self.add_path_parent(&to)?;
         fs::rename(from.clone(), to.clone())?;
+        self.diagnostic_store.remove_path(&from);
         self.layout.refresh_file_explorer(&self.context)?;
         let to = to.try_into()?;
 
@@ -3706,6 +3788,7 @@ Conflict markers will be injected in areas that cannot be merged gracefully."
         log::info!("Received file watcher event: {event:?}");
         match event {
             FileWatcherEvent::ContentModified(path) => {
+                self.diagnostic_store.remove_path(&path);
                 if path.is_file()
                     && self
                         .layout
@@ -3720,13 +3803,19 @@ Conflict markers will be injected in areas that cannot be merged gracefully."
                     )?;
                 }
             }
-            FileWatcherEvent::PathCreated | FileWatcherEvent::PathRemoved(_) => {
+            FileWatcherEvent::PathCreated => {
+                self.layout.refresh_file_explorer(&self.context)?;
+            }
+            FileWatcherEvent::PathRemoved(path) => {
+                self.diagnostic_store.remove_path(&path.try_into()?);
                 self.layout.refresh_file_explorer(&self.context)?;
             }
             FileWatcherEvent::PathRenamed {
                 source,
                 destination,
             } => {
+                self.diagnostic_store
+                    .remove_path(&source.clone().try_into()?);
                 self.context
                     .handle_file_renamed(source.clone(), destination.clone());
                 self.layout.refresh_file_explorer(&self.context)?;
@@ -4594,6 +4683,9 @@ impl DispatchParser {
         }
     }
 }
+
+#[cfg(test)]
+mod diagnostics_tests;
 
 #[cfg(test)]
 mod tests {
