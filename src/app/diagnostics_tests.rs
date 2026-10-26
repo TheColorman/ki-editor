@@ -277,6 +277,24 @@ fn deleting_and_renaming_files_invalidates_cached_diagnostics() -> anyhow::Resul
 }
 
 #[test]
+fn diagnostic_clears_are_applied_even_after_a_file_is_removed() -> anyhow::Result<()> {
+    let (mut app, temp) = app()?;
+    let path: AbsolutePath = temp.path().join("file.cs").try_into()?;
+    std::fs::write(&path, "abc")?;
+    app.publish_diagnostics(publication(&path, vec![diagnostic()]))?;
+    std::fs::remove_file(&path)?;
+    // Missing files no longer appear, even before a clear arrives.
+    assert!(app
+        .diagnostic_store
+        .quickfix_items(DiagnosticSeverityRange::All)
+        .is_empty());
+    assert!(app.publish_diagnostics(publication(&path, Vec::new()))?);
+    assert!(!app.publish_diagnostics(publication(&path, Vec::new()))?);
+    assert!(app.layout.buffers().is_empty());
+    Ok(())
+}
+
+#[test]
 fn retired_server_messages_cannot_repopulate_diagnostics() -> anyhow::Result<()> {
     let (mut app, temp) = app()?;
     let path: AbsolutePath = temp.path().join("file.cs").try_into()?;
