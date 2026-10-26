@@ -28,7 +28,7 @@ use shared::absolute_path::AbsolutePath;
 impl QuickfixListItem {
     fn into_dropdown_item(
         self: &QuickfixListItem,
-        buffers: &HashMap<AbsolutePath, Rc<RefCell<Buffer>>>,
+        preview: Option<&str>,
         position_range: &Range<Position>,
         current_working_directory: &AbsolutePath,
         show_line_number: bool,
@@ -59,17 +59,9 @@ impl QuickfixListItem {
             None
         };
         DropdownItem::new({
-            let content = self
-                .line
-                .clone()
-                .map(|line| line.trim_end_matches(['\n', '\r']).to_string())
-                .unwrap_or_else(|| {
-                    self.location
-                        .preview(buffers)
-                        .unwrap_or_else(|| "[Failed to read file]".to_string())
-                        .trim_matches(['\n', '\r'])
-                        .to_string()
-                });
+            let content = preview
+                .unwrap_or("[Failed to read file]")
+                .trim_matches(['\n', '\r']);
             format!("{prefix}{content}")
         })
         .set_info(self.info.clone())
@@ -195,14 +187,20 @@ impl QuickfixList {
         let items_with_position_range = items
             .iter()
             .filter_map(|item| {
-                let position_range = item.location.position_range(&self.buffers)?;
-                Some((position_range, item))
+                let preview = item
+                    .line
+                    .clone()
+                    .or_else(|| item.location.preview(&self.buffers));
+                let position_range = item
+                    .location
+                    .position_range(&self.buffers, preview.as_deref())?;
+                Some((position_range, item, preview))
             })
             .collect_vec();
 
         let max_line_number_digits_count = (items_with_position_range
             .iter()
-            .map(|(position_range, _)| position_range.start.line)
+            .map(|(position_range, _, _)| position_range.start.line)
             .max()
             .unwrap_or(0)
             + 1)
@@ -212,7 +210,7 @@ impl QuickfixList {
 
         let max_column_number_digits_count = (items_with_position_range
             .iter()
-            .map(|(position_range, _)| position_range.start.column)
+            .map(|(position_range, _, _)| position_range.start.column)
             .max()
             .unwrap_or(0)
             + 1)
@@ -221,15 +219,15 @@ impl QuickfixList {
         .count();
         let dropdown_items = items_with_position_range
             .iter()
-            .chunk_by(|(position_range, item)| (position_range.start.line, item.path().clone()))
+            .chunk_by(|(position_range, item, _)| (position_range.start.line, item.path().clone()))
             .into_iter()
             .flat_map(|(_, items)| {
                 items
                     .into_iter()
                     .enumerate()
-                    .map(|(index, (position_range, item))| {
+                    .map(|(index, (position_range, item, preview))| {
                         item.to_owned().into_dropdown_item(
-                            &self.buffers,
+                            preview.as_deref(),
                             position_range,
                             current_working_directory,
                             index == 0,
@@ -451,6 +449,7 @@ impl QuickfixLocation {
     fn position_range(
         &self,
         buffers: &HashMap<AbsolutePath, Rc<RefCell<Buffer>>>,
+        preview: Option<&str>,
     ) -> Option<Range<Position>> {
         match self {
             Self::Characters(location) => buffers
@@ -458,7 +457,29 @@ impl QuickfixLocation {
                 .borrow()
                 .char_index_range_to_position_range(location.range)
                 .ok(),
-            Self::Document { range, .. } => Some(range.range.start.into()..range.range.end.into()),
+            Self::Document { range, .. } => {
+                let mut start = Position::from(range.range.start);
+                let mut end = Position::from(range.range.end);
+                if let Some(preview) = preview {
+                    if let Ok(column) = crate::lsp::position::column_to_char(
+                        preview.chars(),
+                        range.range.start.character,
+                        &range.encoding,
+                    ) {
+                        start.column = column;
+                    }
+                    if start.line == end.line {
+                        if let Ok(column) = crate::lsp::position::column_to_char(
+                            preview.chars(),
+                            range.range.end.character,
+                            &range.encoding,
+                        ) {
+                            end.column = column;
+                        }
+                    }
+                }
+                Some(start..end)
+            }
         }
     }
 
@@ -646,6 +667,29 @@ mod test_quickfix_list {
     use itertools::Itertools;
     use pretty_assertions::assert_eq;
     use shared::absolute_path::AbsolutePath;
+
+    #[test]
+    fn deferred_preview_uses_character_columns_after_non_bmp_text() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path: AbsolutePath = temp.path().join("file.txt").try_into()?;
+        std::fs::write(&path, "🦀target\n")?;
+        let item = QuickfixListItem::document(
+            path,
+            crate::lsp::position::EncodedRange {
+                range: lsp_types::Range::new(
+                    lsp_types::Position::new(0, 2),
+                    lsp_types::Position::new(0, 8),
+                ),
+                encoding: lsp_types::PositionEncodingKind::UTF16,
+            },
+            None,
+        );
+        let mut list = QuickfixList::default();
+        list.set_items(vec![item], &temp.path().try_into()?);
+        assert!(list.buffers.is_empty());
+        assert_eq!(list.dropdown_items()[0].display(), "1:2  🦀target");
+        Ok(())
+    }
 
     #[test]
     fn deferred_entries_do_not_cache_source_buffers() -> anyhow::Result<()> {
