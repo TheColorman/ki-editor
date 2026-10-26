@@ -22,20 +22,7 @@ impl EncodedRange {
     fn to_char(&self, buffer: &Buffer, position: Position) -> anyhow::Result<CharIndex> {
         let start = buffer.line_to_char(position.line as usize)?;
         let line = buffer.get_line_by_line_index(position.line as usize)?;
-        let mut units = 0;
-        let mut characters = 0;
-        for character in line.chars().take_while(|c| !matches!(c, '\r' | '\n')) {
-            if units == position.character as usize {
-                return Ok(start + characters);
-            }
-            units += character_width(character, &self.encoding)?;
-            characters += 1;
-        }
-        anyhow::ensure!(
-            units == position.character as usize,
-            "Invalid LSP column {position:?}"
-        );
-        Ok(start + characters)
+        Ok(start + column_to_char(line.chars(), position.character, &self.encoding)?)
     }
 
     pub fn from_char_range(
@@ -59,6 +46,25 @@ impl EncodedRange {
             encoding,
         })
     }
+}
+
+/// Also used for bounded picker previews; no document buffer is needed.
+pub fn column_to_char(
+    line: impl Iterator<Item = char>,
+    column: u32,
+    encoding: &PositionEncodingKind,
+) -> anyhow::Result<usize> {
+    let mut units = 0;
+    let mut characters = 0;
+    for character in line.take_while(|c| !matches!(c, '\r' | '\n')) {
+        if units == column as usize {
+            return Ok(characters);
+        }
+        units += character_width(character, encoding)?;
+        characters += 1;
+    }
+    anyhow::ensure!(units == column as usize, "Invalid LSP column {column}");
+    Ok(characters)
 }
 
 fn character_width(character: char, encoding: &PositionEncodingKind) -> anyhow::Result<usize> {
