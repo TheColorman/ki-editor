@@ -34,6 +34,7 @@ fn did_save_respects_server_capabilities() -> anyhow::Result<()> {
         let mut lsp_process = LspServerProcess {
             diagnostic_source: DiagnosticSource::External("test".into()),
             diagnostic_lifetime: DiagnosticLifetime::default(),
+            diagnostic_inbox: DiagnosticInbox::default(),
             language: Language::default(),
             server_config: LspServerConfig::new(
                 "test",

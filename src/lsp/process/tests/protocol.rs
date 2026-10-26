@@ -43,12 +43,12 @@ fn pull_diagnostics_keep_document_versions_and_ignore_obsolete_responses() -> an
     process.handle_reply(
         serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": { "kind": "full", "items": [] } }),
     )?;
-    let AppMessage::LspNotification(notification) = app_receiver.try_recv()? else {
+    let AppMessage::DiagnosticsReady(inbox) = app_receiver.try_recv()? else {
         panic!("Expected diagnostics");
     };
-    let LspNotification::PublishDiagnosticsFromServer(publication) = *notification else {
-        panic!("Expected server diagnostics");
-    };
+    let (publications, more) = inbox.take_batch(64);
+    assert!(!more);
+    let publication = &publications[0];
     assert_eq!(publication.params.version, Some(2));
     assert_eq!(publication.encoding, PositionEncodingKind::UTF16);
     drop(process);

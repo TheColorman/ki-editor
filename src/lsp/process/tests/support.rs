@@ -29,6 +29,7 @@ pub(super) fn process_for_server_requests() -> anyhow::Result<ServerRequestProce
     let process = LspServerProcess {
         diagnostic_source: DiagnosticSource::External("test".into()),
         diagnostic_lifetime: DiagnosticLifetime::default(),
+        diagnostic_inbox: DiagnosticInbox::default(),
         language: Language::default(),
         server_config: LspServerConfig::new(
             "test",

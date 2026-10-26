@@ -114,6 +114,7 @@ pub struct App<T: Frontend> {
     enable_lsp: bool,
     diagnostic_store: crate::lsp::diagnostics::DiagnosticStore,
     diagnostic_quickfix_severity: Option<crate::quickfix_list::DiagnosticSeverityRange>,
+    needs_render: bool,
 
     global_title: Option<String>,
 
@@ -292,6 +293,7 @@ impl<T: Frontend> App<T> {
             multibuffer: None,
             diagnostic_store: crate::lsp::diagnostics::DiagnosticStore::default(),
             diagnostic_quickfix_severity: None,
+            needs_render: true,
         };
 
         app.restore_session();
@@ -352,6 +354,7 @@ impl<T: Frontend> App<T> {
             recv(self.receiver) -> msg => msg,
         } {
             let should_quit = self.process_message(message).unwrap_or_else(|e| {
+                self.needs_render = true;
                 self.show_global_info(Info::new("ERROR".to_string(), e.to_string()));
                 false
             });
@@ -364,14 +367,35 @@ impl<T: Frontend> App<T> {
                 break;
             }
 
-            self.render()?;
+            if self.needs_render {
+                self.render()?;
+            }
         }
 
         self.quit()
     }
 
     pub fn process_message(&mut self, message: AppMessage) -> anyhow::Result<bool> {
+        self.needs_render = true;
         match message {
+            AppMessage::DiagnosticsReady(inbox) => {
+                let (batch, more) = inbox.take_batch(64);
+                // Reschedule before applying the batch, including on errors.
+                if more {
+                    self.sender.send(AppMessage::DiagnosticsReady(inbox))?;
+                }
+                self.needs_render = false;
+                for publication in batch {
+                    match self.publish_diagnostics(publication) {
+                        Ok(changed) => self.needs_render |= changed,
+                        Err(error) => log::warn!("Ignoring invalid LSP diagnostics: {error:?}"),
+                    }
+                }
+                if self.needs_render && self.context.mode() == Some(GlobalMode::QuickfixListItem) {
+                    self.refresh_diagnostic_quickfix();
+                }
+                Ok(false)
+            }
             AppMessage::Event(event) => self.handle_event(event),
             AppMessage::LspNotification(notification) => {
                 self.handle_lsp_notification(*notification).map(|_| false)
@@ -1823,10 +1847,6 @@ impl<T: Frontend> App<T> {
     pub fn handle_lsp_notification(&mut self, notification: LspNotification) -> anyhow::Result<()> {
         self.invalidate_stale_completion();
         match notification {
-            LspNotification::PublishDiagnosticsFromServer(publication) => {
-                self.publish_diagnostics(publication)?;
-                Ok(())
-            }
             LspNotification::DiagnosticsStopped(source) => {
                 self.diagnostic_store.clear_source(&source);
                 for buffer in self.layout.buffers() {
@@ -2056,11 +2076,14 @@ impl<T: Frontend> App<T> {
         source: String,
         diagnostics: Vec<lsp_types::Diagnostic>,
     ) -> anyhow::Result<()> {
-        self.store_diagnostics(
+        let changed = self.store_diagnostics(
             path,
             crate::lsp::diagnostics::DiagnosticSource::External(source),
             crate::lsp::diagnostics::DiagnosticSnapshot::external(diagnostics),
         );
+        if changed && self.context.mode() == Some(GlobalMode::QuickfixListItem) {
+            self.refresh_diagnostic_quickfix();
+        }
         Ok(())
     }
 
@@ -2090,7 +2113,7 @@ impl<T: Frontend> App<T> {
         source: crate::lsp::diagnostics::DiagnosticSource,
         snapshot: crate::lsp::diagnostics::DiagnosticSnapshot,
     ) -> bool {
-        let changed = if let Some(editor) = self.layout.get_existing_editor(&path) {
+        if let Some(editor) = self.layout.get_existing_editor(&path) {
             editor
                 .borrow_mut()
                 .editor_mut()
@@ -2098,11 +2121,7 @@ impl<T: Frontend> App<T> {
                 .set_diagnostics(source, snapshot)
         } else {
             self.diagnostic_store.replace(path, source, snapshot)
-        };
-        if changed && self.context.mode() == Some(GlobalMode::QuickfixListItem) {
-            self.refresh_diagnostic_quickfix();
         }
-        changed
     }
 
     fn refresh_diagnostic_quickfix(&mut self) {
@@ -2233,8 +2252,26 @@ impl<T: Frontend> App<T> {
         // We need to store the current item index,
         // as we need to restore it after resetting the quickfix list items
         let current_item_index = self.context.quickfix_list().current_index();
+        let selected = self
+            .context
+            .quickfix_list()
+            .items()
+            .get(current_item_index)
+            .map(|item| item.location().clone());
 
         self.context.set_quickfix_list_items(items, kind);
+
+        let current_item_index = selected
+            .and_then(|selected| {
+                self.context
+                    .quickfix_list()
+                    .items()
+                    .iter()
+                    .position(|item| item.location() == &selected)
+            })
+            .unwrap_or_else(|| {
+                current_item_index.min(self.context.quickfix_list().items().len().saturating_sub(1))
+            });
 
         self.context
             .quickfix_list_mut()
@@ -4534,6 +4571,7 @@ pub enum Scope {
 #[derive(Debug)]
 pub enum AppMessage {
     LspNotification(Box<LspNotification>),
+    DiagnosticsReady(crate::lsp::diagnostics::DiagnosticInbox),
     Event(Event),
     Quit,
     SyntaxHighlightResponse {
