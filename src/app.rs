@@ -1940,7 +1940,7 @@ impl<T: Frontend> App<T> {
                     .to_file_path()
                     .map_err(|err| anyhow::anyhow!("Couldn't convert URI to file path: {err:?}"))?
                     .try_into()?;
-                if path.is_file() {
+                if path.is_file() || params.diagnostics.is_empty() {
                     self.update_diagnostics_from_source(path, server_id, params.diagnostics)?;
                 } else {
                     log::info!("Ignoring LSP diagnostics for non-file URI: {path:?}");
@@ -2092,7 +2092,7 @@ impl<T: Frontend> App<T> {
         publication: crate::lsp::diagnostics::DiagnosticPublication,
     ) -> anyhow::Result<bool> {
         let path: AbsolutePath = publication.params.uri.try_into()?;
-        if !path.is_file() {
+        if !path.is_file() && !publication.params.diagnostics.is_empty() {
             return Ok(false);
         }
         Ok(self.store_diagnostics(

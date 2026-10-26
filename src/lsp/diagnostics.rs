@@ -230,9 +230,12 @@ impl DiagnosticStore {
         self.documents
             .iter()
             .flat_map(|(path, sources)| {
+                let modified = path.last_modified_time().ok();
                 sources
                     .iter()
-                    .filter(|(_, stored)| stored.snapshot.lifetime.is_active())
+                    .filter(move |(_, stored)| {
+                        stored.snapshot.lifetime.is_active() && stored.modified == modified
+                    })
                     .flat_map(|(_, stored)| {
                         stored
                             .snapshot
