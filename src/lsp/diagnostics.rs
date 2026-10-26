@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::SystemTime,
 };
@@ -83,6 +83,65 @@ pub struct DiagnosticPublication {
     pub params: PublishDiagnosticsParams,
     pub encoding: PositionEncodingKind,
     pub lifetime: DiagnosticLifetime,
+}
+
+/// Replaceable publications have their own inbox, never blocking protocol replies.
+/// One wake-up represents any number of updates to the same documents.
+#[derive(Clone, Default)]
+pub struct DiagnosticInbox(Arc<Mutex<PendingDiagnostics>>);
+
+type PendingDiagnostics =
+    indexmap::IndexMap<(DiagnosticSource, lsp_types::Url), DiagnosticPublication>;
+
+impl std::fmt::Debug for DiagnosticInbox {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DiagnosticInbox")
+            .field("pending", &self.0.lock().unwrap().len())
+            .finish()
+    }
+}
+
+impl DiagnosticInbox {
+    pub fn publish(
+        &self,
+        publication: DiagnosticPublication,
+        sender: &crossbeam_channel::Sender<crate::app::AppMessage>,
+    ) {
+        if !publication.lifetime.is_active() {
+            return;
+        }
+        let wake = {
+            let mut pending = self.0.lock().unwrap();
+            let key = (publication.source.clone(), publication.params.uri.clone());
+            if pending.get(&key).is_some_and(|old| {
+                old == &publication
+                    || matches!((old.params.version, publication.params.version), (Some(old), Some(new)) if new < old)
+            }) {
+                return;
+            }
+            let wake = pending.is_empty();
+            pending.insert(key, publication);
+            wake
+        };
+        if wake
+            && sender
+                .send(crate::app::AppMessage::DiagnosticsReady(self.clone()))
+                .is_err()
+        {
+            self.0.lock().unwrap().clear();
+        }
+    }
+
+    pub fn take_batch(&self, limit: usize) -> (Vec<DiagnosticPublication>, bool) {
+        let mut pending = self.0.lock().unwrap();
+        let count = limit.min(pending.len());
+        let batch = pending
+            .drain(..count)
+            .map(|(_, publication)| publication)
+            .collect();
+        (batch, !pending.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +261,109 @@ impl DiagnosticStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn publication(
+        uri: &str,
+        version: Option<i32>,
+        diagnostics: Vec<Diagnostic>,
+    ) -> DiagnosticPublication {
+        DiagnosticPublication {
+            source: DiagnosticSource::External("test".into()),
+            params: PublishDiagnosticsParams {
+                uri: uri.parse().unwrap(),
+                version,
+                diagnostics,
+            },
+            encoding: PositionEncodingKind::UTF16,
+            lifetime: DiagnosticLifetime::default(),
+        }
+    }
+
+    #[test]
+    fn a_burst_has_one_wakeup_and_keeps_the_final_clear() {
+        let inbox = DiagnosticInbox::default();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        for version in 0..10_000 {
+            inbox.publish(
+                publication(
+                    "file:///unopened.cs",
+                    Some(version),
+                    vec![Diagnostic::default()],
+                ),
+                &sender,
+            );
+        }
+        inbox.publish(
+            publication("file:///unopened.cs", Some(10_000), Vec::new()),
+            &sender,
+        );
+        assert_eq!(receiver.len(), 1);
+        let (batch, more) = inbox.take_batch(64);
+        assert!(!more);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].params.version, Some(10_000));
+        assert!(batch[0].params.diagnostics.is_empty());
+        assert!(inbox.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_pending_updates_do_not_overwrite_newer_versions() {
+        let inbox = DiagnosticInbox::default();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        inbox.publish(
+            publication("file:///file.cs", Some(2), vec![Diagnostic::default()]),
+            &sender,
+        );
+        inbox.publish(publication("file:///file.cs", Some(1), Vec::new()), &sender);
+        assert_eq!(receiver.len(), 1);
+        assert_eq!(inbox.take_batch(64).0[0].params.version, Some(2));
+    }
+
+    #[test]
+    fn batches_are_bounded_and_publishers_can_wake_an_empty_inbox_again() {
+        let inbox = DiagnosticInbox::default();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        for i in 0..100 {
+            inbox.publish(
+                publication(&format!("file:///{i}.cs"), None, Vec::new()),
+                &sender,
+            );
+        }
+        assert_eq!(receiver.len(), 1);
+        let (batch, more) = inbox.take_batch(64);
+        assert_eq!(batch.len(), 64);
+        assert!(more);
+        assert_eq!(inbox.take_batch(64).0.len(), 36);
+        inbox.publish(publication("file:///new.cs", None, Vec::new()), &sender);
+        assert_eq!(receiver.len(), 2);
+    }
+
+    #[test]
+    fn concurrent_publishers_preserve_each_documents_final_state() {
+        let inbox = DiagnosticInbox::default();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        std::thread::scope(|scope| {
+            for i in 0..4 {
+                let inbox = &inbox;
+                let sender = &sender;
+                scope.spawn(move || {
+                    for version in 0..1000 {
+                        inbox.publish(
+                            publication(&format!("file:///{i}.cs"), Some(version), Vec::new()),
+                            sender,
+                        );
+                    }
+                });
+            }
+        });
+        assert_eq!(receiver.len(), 1);
+        let (batch, more) = inbox.take_batch(64);
+        assert!(!more);
+        assert_eq!(batch.len(), 4);
+        assert!(batch
+            .iter()
+            .all(|publication| publication.params.version == Some(999)));
+    }
 
     #[test]
     fn empty_publications_do_not_accumulate_documents() -> anyhow::Result<()> {

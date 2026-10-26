@@ -42,6 +42,72 @@ fn diagnostic() -> Diagnostic {
 }
 
 #[test]
+fn diagnostic_batches_skip_noop_renders_but_apply_final_clears() -> anyhow::Result<()> {
+    let (mut app, temp) = app()?;
+    app.enable_lsp = false;
+    let path: AbsolutePath = temp.path().join("file.txt").try_into()?;
+    std::fs::write(&path, "abc")?;
+    app.open_file(&path, BufferOwner::User, false, true)?;
+    app.publish_diagnostics(publication(&path, vec![diagnostic()]))?;
+    let inbox = crate::lsp::diagnostics::DiagnosticInbox::default();
+    for _ in 0..10_000 {
+        inbox.publish(publication(&path, vec![diagnostic()]), &app.sender);
+    }
+    inbox.publish(publication(&path, Vec::new()), &app.sender);
+    app.process_message(AppMessage::DiagnosticsReady(inbox.clone()))?;
+    assert!(app.needs_render);
+    assert!(app
+        .current_component()
+        .borrow()
+        .editor()
+        .buffer()
+        .diagnostics()
+        .is_empty());
+    inbox.publish(publication(&path, Vec::new()), &app.sender);
+    app.process_message(AppMessage::DiagnosticsReady(inbox))?;
+    assert!(!app.needs_render);
+    Ok(())
+}
+
+#[test]
+fn queued_diagnostics_do_not_delay_quit() -> anyhow::Result<()> {
+    let (app, temp) = app()?;
+    let path: AbsolutePath = temp.path().join("file.cs").try_into()?;
+    let inbox = crate::lsp::diagnostics::DiagnosticInbox::default();
+    for _ in 0..10_000 {
+        inbox.publish(publication(&path, Vec::new()), &app.sender);
+    }
+    app.quit_all()?;
+    let message = crossbeam_channel::select_biased! {
+        recv(app.priority_receiver) -> message => message?,
+        recv(app.receiver) -> message => message?,
+    };
+    assert!(matches!(message, AppMessage::Quit));
+    Ok(())
+}
+
+#[test]
+fn diagnostic_refresh_preserves_the_selected_quickfix_location() -> anyhow::Result<()> {
+    let (mut app, temp) = app()?;
+    app.enable_lsp = false;
+    let selected: AbsolutePath = temp.path().join("b.txt").try_into()?;
+    let earlier: AbsolutePath = temp.path().join("a.txt").try_into()?;
+    for path in [&selected, &earlier] {
+        std::fs::write(path, "abc")?;
+    }
+    app.publish_diagnostics(publication(&selected, vec![diagnostic()]))?;
+    app.update_quickfix_list_item(QuickfixListType::Diagnostic(DiagnosticSeverityRange::All));
+    app.goto_quickfix_list_item(Movement::Current(IfCurrentNotFound::LookForward))?;
+    app.context.set_mode(Some(GlobalMode::QuickfixListItem));
+    let inbox = crate::lsp::diagnostics::DiagnosticInbox::default();
+    inbox.publish(publication(&earlier, vec![diagnostic()]), &app.sender);
+    app.process_message(AppMessage::DiagnosticsReady(inbox))?;
+    let list = app.context.quickfix_list();
+    assert_eq!(list.items()[list.current_index()].path(), &selected);
+    Ok(())
+}
+
+#[test]
 fn diagnostic_flood_never_opens_files_or_starts_servers() -> anyhow::Result<()> {
     let (mut app, temp) = app()?;
     let outside = tempfile::tempdir()?;

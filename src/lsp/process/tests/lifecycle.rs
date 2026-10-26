@@ -114,6 +114,7 @@ fn initialized_shutdown_sends_shutdown_and_exit() -> anyhow::Result<()> {
     let mut lsp_process = LspServerProcess {
         diagnostic_source: DiagnosticSource::External("test".into()),
         diagnostic_lifetime: DiagnosticLifetime::default(),
+        diagnostic_inbox: DiagnosticInbox::default(),
         language: Language::default(),
         server_config: LspServerConfig::new(
             "test",
@@ -185,6 +186,7 @@ fn lsp_should_shutdown_after_too_many_consecutive_errors() -> anyhow::Result<()>
     let lsp_process = LspServerProcess {
         diagnostic_source: DiagnosticSource::External("test".into()),
         diagnostic_lifetime: DiagnosticLifetime::default(),
+        diagnostic_inbox: DiagnosticInbox::default(),
         language: Language::default(),
         server_config: LspServerConfig::new(
             "test",

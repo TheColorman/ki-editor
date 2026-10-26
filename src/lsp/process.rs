@@ -32,7 +32,9 @@ use super::code_action::CodeAction;
 use super::completion::session::{
     CompletionContext, CompletionResponse as ServerCompletionResponse,
 };
-use super::diagnostics::{DiagnosticLifetime, DiagnosticPublication, DiagnosticSource};
+use super::diagnostics::{
+    DiagnosticInbox, DiagnosticLifetime, DiagnosticPublication, DiagnosticSource,
+};
 use super::goto_definition_response::GotoDefinitionResponse;
 use super::hover::Hover;
 use super::manager::LspServerKey;
@@ -97,6 +99,7 @@ struct LspServerProcess {
     language: Language,
     diagnostic_source: DiagnosticSource,
     diagnostic_lifetime: DiagnosticLifetime,
+    diagnostic_inbox: DiagnosticInbox,
     server_config: LspServerConfig,
     stdin: process::ChildStdin,
 
@@ -178,7 +181,6 @@ pub enum LspNotification {
         server_id: String,
         params: PublishDiagnosticsParams,
     },
-    PublishDiagnosticsFromServer(DiagnosticPublication),
     DiagnosticsStopped(DiagnosticSource),
     Completion(ServerCompletionResponse),
     Hover(Hover),
@@ -524,6 +526,7 @@ impl LspServerProcess {
             language: language.clone(),
             diagnostic_source: diagnostic_source.clone(),
             diagnostic_lifetime: DiagnosticLifetime(alive.clone()),
+            diagnostic_inbox: DiagnosticInbox::default(),
             server_config: server_config.clone(),
             stdin,
             stdout: Some(stdout),
@@ -1421,7 +1424,10 @@ impl LspServerProcess {
 
                 let method = request.method.clone();
                 // Parse the reply as Notification
-                if method.as_str() != "$/progress" {
+                if !matches!(
+                    method.as_str(),
+                    "$/progress" | "textDocument/publishDiagnostics"
+                ) {
                     lsp_info!(
                         self.lsp_command(),
                         "LspServerProcess::handle_notification: {}",
@@ -2561,14 +2567,15 @@ impl LspServerProcess {
     }
 
     fn publish_diagnostics(&self, params: PublishDiagnosticsParams) {
-        self.send_to_app(AppMessage::LspNotification(Box::new(
-            LspNotification::PublishDiagnosticsFromServer(DiagnosticPublication {
+        self.diagnostic_inbox.publish(
+            DiagnosticPublication {
                 source: self.diagnostic_source.clone(),
                 params,
                 encoding: self.position_encoding(),
                 lifetime: self.diagnostic_lifetime.clone(),
-            }),
-        )));
+            },
+            &self.app_message_sender,
+        );
     }
 }
 
