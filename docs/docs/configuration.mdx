@@ -107,6 +107,23 @@ Ki sends heartbeats when a file is focused, edited, or saved. Save heartbeats in
 
 When Ki runs embedded inside VS Code, this native tracker is disabled to avoid duplicate activity if the VS Code WakaTime extension is installed.
 
+## C#
+
+Standalone Ki uses OmniSharp for C#. Its default process environment sets `ContinueOnError=WarnAndContinue` so MSBuild's design-time builds can retain the project model despite errors such as cached NuGet audit failures. This setting is scoped to the language-server process: your command-line builds and restores are unaffected, and NuGet audit remains enabled. Project-load diagnostics are displayed as LSP warnings; language features may be incomplete when references cannot be resolved.
+
+If you override C#'s `lsp_servers`, retain that environment setting on the OmniSharp entry to keep this behavior:
+
+```json
+{
+  "id": "omnisharp",
+  "command": { "command": "omnisharp", "arguments": ["--languageserver"] },
+  "environment": { "ContinueOnError": "WarnAndContinue" },
+  "primary": true
+}
+```
+
+Use `"ContinueOnError": "false"` if you prefer strict design-time project loading. This setting does not make every project error recoverable, and it does not fix vulnerable dependencies.
+
 ## Java
 
 Standalone Ki provides Java language features through [Eclipse JDT Language Server](https://github.com/eclipse-jdtls/eclipse.jdt.ls). Install `jdtls` and make sure the `jdtls` command is available on the `PATH` inherited by Ki. Current JDTLS releases require Java 21 or newer to run. If you install the official `bin/jdtls` wrapper rather than a distribution package, it also requires Python 3.9 or newer.

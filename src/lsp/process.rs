@@ -1593,10 +1593,31 @@ impl LspServerProcess {
                         )));
                     }
 
-                    _ => lsp_info!(
-                        self.lsp_command(),
-                        "unhandled Incoming Notification: {method}"
-                    ),
+                    _ => {
+                        if let Some(message) = request.params.as_ref().and_then(|params| {
+                            self.server_config
+                                .behavior()
+                                .notification_warning(&method, params)
+                        }) {
+                            lsp_info!(
+                                self.lsp_command(),
+                                "Server notification {method}: {:?}",
+                                request.params
+                            );
+                            self.send_to_app(AppMessage::LspNotification(Box::new(
+                                LspNotification::ShowMessage {
+                                    server_id: self.server_config.id().to_string(),
+                                    typ: MessageType::WARNING,
+                                    message,
+                                },
+                            )));
+                        } else {
+                            lsp_info!(
+                                self.lsp_command(),
+                                "unhandled Incoming Notification: {method}"
+                            );
+                        }
+                    }
                 }
             }
         }

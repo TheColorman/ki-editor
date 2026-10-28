@@ -2368,6 +2368,22 @@ src/main.rs
 }
 
 #[test]
+fn lsp_project_warning_is_visible() -> anyhow::Result<()> {
+    execute_test(|_| {
+        Box::new([
+            App(HandleLspNotification(LspNotification::ShowMessage {
+                server_id: "omnisharp".to_string(),
+                typ: lsp_types::MessageType::WARNING,
+                message: "OmniSharp reported problems while loading App.csproj.".to_string(),
+            })),
+            Expect(GlobalInfo(
+                "OmniSharp reported problems while loading App.csproj.".to_string(),
+            )),
+        ])
+    })
+}
+
+#[test]
 fn diagnostic_info() -> Result<(), anyhow::Error> {
     execute_test(|s| {
         Box::new([

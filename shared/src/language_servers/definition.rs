@@ -23,6 +23,12 @@ pub trait ServerBehavior: Sync {
     fn error_hint(&self, _message: &str) -> Option<&'static str> {
         None
     }
+
+    /// Surface actionable server-specific notifications without promoting every
+    /// warning or error in a server's debug log to a popup.
+    fn notification_warning(&self, _method: &str, _params: &Value) -> Option<String> {
+        None
+    }
 }
 
 pub struct Placeholder {
