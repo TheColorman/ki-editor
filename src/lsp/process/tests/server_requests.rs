@@ -2,6 +2,60 @@ use super::super::*;
 use super::support::process_for_server_requests;
 
 #[test]
+fn omnisharp_project_problems_are_displayed_as_warnings() -> anyhow::Result<()> {
+    let (mut process, mut child, app_receiver, _, _, _tempdir, _) = process_for_server_requests()?;
+    // A wrapper retains the built-in behavior through its configured server ID.
+    process.server_config = LspServerConfig::new(
+        "omnisharp",
+        shared::language::Command::new("custom-wrapper", &[]),
+    );
+    process.handle_reply(serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "o#/msbuildprojectdiagnostics",
+        "params": {
+            "FileName": "/project/App.csproj",
+            "Errors": [{ "Text": "Warning As Error: Package has a known vulnerability" }],
+            "Warnings": []
+        }
+    }))?;
+    let AppMessage::LspNotification(notification) = app_receiver.try_recv()? else {
+        panic!("expected an LSP notification");
+    };
+    let LspNotification::ShowMessage {
+        server_id,
+        typ,
+        message,
+    } = *notification
+    else {
+        panic!("expected a visible project warning");
+    };
+    assert_eq!(server_id, "omnisharp");
+    assert_eq!(typ, MessageType::WARNING);
+    assert!(message.contains("/project/App.csproj"));
+    assert!(message.contains("Package has a known vulnerability"));
+    process.handle_reply(serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "o#/msbuildprojectdiagnostics",
+        "params": { "FileName": "/project/App.csproj", "Errors": [], "Warnings": [] }
+    }))?;
+    assert!(app_receiver.try_recv().is_err());
+    process.server_config =
+        LspServerConfig::new("other", shared::language::Command::new("other-server", &[]));
+    process.handle_reply(serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "o#/msbuildprojectdiagnostics",
+        "params": {
+            "FileName": "/project/App.csproj",
+            "Errors": [{ "Text": "not an OmniSharp server" }]
+        }
+    }))?;
+    assert!(app_receiver.try_recv().is_err());
+    drop(process);
+    child.wait()?;
+    Ok(())
+}
+
+#[test]
 fn show_message_request_is_displayed_and_cancelled() -> anyhow::Result<()> {
     let (mut process, mut child, app_receiver, _sender, _receiver, _tempdir, messages_path) =
         process_for_server_requests()?;
