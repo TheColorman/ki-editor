@@ -2096,17 +2096,38 @@ class ObservationSpecification(Base):
 
         #[test]
         #[ignore = "requires prettierd on PATH"]
-        fn vue_formatter_uses_nested_config_and_actual_filename() -> anyhow::Result<()> {
-            for prettier_config in [
-                None,
-                Some(
-                    r#"{"useTabs":false,"overrides":[{"files":"Component.vue","options":{"useTabs":true}}]}"#,
+        fn vue_formatter_uses_nested_config_plugins_and_actual_filename() -> anyhow::Result<()> {
+            for (prettier_config, package_plugin) in [
+                (None, false),
+                (
+                    Some(
+                        r#"{"useTabs":false,"overrides":[{"files":"Component.vue","options":{"useTabs":true}}]}"#,
+                    ),
+                    false,
+                ),
+                (
+                    Some(r#"{"plugins":["prettier-plugin-test"],"useTabs":true}"#),
+                    false,
+                ),
+                (
+                    Some(r#"{"plugins":["prettier-plugin-test"],"useTabs":true}"#),
+                    true,
                 ),
             ] {
                 let dir = tempfile::tempdir()?;
                 let frontend = dir.path().join("frontends");
                 let app = frontend.join("apps/app with spaces");
+                let plugin = if package_plugin { &app } else { &frontend }
+                    .join("node_modules/prettier-plugin-test");
                 std::fs::create_dir_all(&app)?;
+                std::fs::create_dir_all(&plugin)?;
+                std::fs::write(frontend.join("pnpm-workspace.yaml"), "packages: [apps/*]\n")?;
+                std::fs::write(app.join("package.json"), "{}")?;
+                std::fs::write(
+                    plugin.join("package.json"),
+                    r#"{"name":"prettier-plugin-test","type":"module","exports":"./index.js"}"#,
+                )?;
+                std::fs::write(plugin.join("index.js"), "export const options = {};\n")?;
                 std::fs::write(
                     frontend.join(".editorconfig"),
                     "root = true\n[*]\nindent_style = tab\n",

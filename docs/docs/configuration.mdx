@@ -39,7 +39,7 @@ Standalone Ki sends the buffer contents to the configured formatter on stdin and
 }
 ```
 
-Passing the real filename lets the formatter discover configuration near the file, including nested Prettier and EditorConfig settings and filename-specific overrides. The formatter still runs in Ki's working directory. Arguments are passed directly, without shell expansion; do not add shell quotes around `{file_path}`.
+Passing the real filename lets the formatter discover configuration near the file, including nested Prettier and EditorConfig settings and filename-specific overrides. Prettier and prettierd run in the nearest enclosing package or package-manager workspace, falling back to the file's directory. This lets Prettier resolve plugins installed in that package or an ancestor workspace even when Ki was opened from the repository root. Executables in enclosing `node_modules/.bin` directories take precedence over `PATH`, with the nearest taking priority. Explicit relative executable paths remain relative to Ki's working directory. Other formatters keep Ki's working directory. Arguments are passed directly, without shell expansion; do not add shell quotes around `{file_path}`.
 
 ## Language Server Completions
 
