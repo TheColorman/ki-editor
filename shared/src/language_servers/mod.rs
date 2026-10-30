@@ -33,7 +33,7 @@ pub mod nil;
 pub mod ocamllsp;
 pub mod ols;
 pub mod omnisharp;
-mod package_workspace;
+pub(crate) mod package_workspace;
 pub mod perlnavigator;
 pub mod pyright;
 pub mod qmlls;

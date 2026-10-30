@@ -2,7 +2,7 @@
 
 use super::workspace_root::{RootFallback, RootMarker, WorkspaceRootPolicy};
 
-pub(super) const WORKSPACE_MARKERS: RootMarker = RootMarker::Paths(&[
+pub(crate) const WORKSPACE_MARKERS: RootMarker = RootMarker::Paths(&[
     "pnpm-workspace.yaml",
     "pnpm-workspace.yml",
     "pnpm-lock.yaml",
@@ -12,7 +12,7 @@ pub(super) const WORKSPACE_MARKERS: RootMarker = RootMarker::Paths(&[
     "bun.lock",
 ]);
 
-pub(super) const PROJECT_MARKERS: RootMarker = RootMarker::Paths(&["package.json"]);
+pub(crate) const PROJECT_MARKERS: RootMarker = RootMarker::Paths(&["package.json"]);
 
 pub(super) const ROOT_POLICY: WorkspaceRootPolicy = WorkspaceRootPolicy {
     marker_groups: &[&[WORKSPACE_MARKERS], &[PROJECT_MARKERS]],
