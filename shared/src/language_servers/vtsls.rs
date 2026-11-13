@@ -78,6 +78,8 @@ fn vue_settings() -> Value {
         "tsserver": {
             "globalPlugins": [{
                 "name": "@vue/typescript-plugin",
+                // The fallback `typescript-plugins` namespace has no suggestion defaults.
+                "configNamespace": "typescript",
                 "location": "${vue_typescript_plugin}",
                 "languages": ["vue"],
                 "enableForWorkspaceTypeScriptVersions": true
@@ -159,6 +161,34 @@ fn find_in_path(command: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::language_servers::configuration::ServerConfiguration;
+
+    #[test]
+    fn vue_plugin_uses_typescript_completion_settings() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root: AbsolutePath = temp.path().try_into()?;
+        let server = vue();
+        let configuration = ServerConfiguration::new(&server, &root);
+        for (source, settings) in [
+            (
+                "initialization options",
+                configuration.initialization_options().unwrap()["vtsls"].clone(),
+            ),
+            (
+                "workspace configuration",
+                configuration.configuration(Some(""))["vtsls"].clone(),
+            ),
+            (
+                "vtsls configuration",
+                configuration.configuration(Some("vtsls")),
+            ),
+        ] {
+            assert_eq!(
+                settings["tsserver"]["globalPlugins"][0]["configNamespace"], "typescript",
+                "Vue completions must use TypeScript's suggestion settings in {source}",
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn resolves_and_validates_workspace_sdk_and_vue_plugin() -> anyhow::Result<()> {
