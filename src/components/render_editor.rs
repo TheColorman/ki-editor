@@ -1087,12 +1087,22 @@ impl Editor {
                 is_protected_range_start: false,
             })
         };
+        // Regex input needs complete lines: a newline-excluding range can split
+        // the final UTF-8 character when the buffer has no trailing newline.
+        let regex_byte_range = buffer
+            .line_to_byte(visible_line_range.start)
+            .and_then(|start| {
+                buffer
+                    .line_to_byte(visible_line_range.end)
+                    .map(|end| start..end)
+            })
+            .unwrap_or_default();
         let visible_slice_str = buffer
             .rope()
-            .get_byte_slice(visible_line_byte_range.clone())
+            .get_byte_slice(regex_byte_range.clone())
             .map(|s| s.to_string())
             .unwrap_or_default();
-        let visible_offset = visible_line_byte_range.start;
+        let visible_offset = regex_byte_range.start;
 
         let custom_regex_highlights = lazy_regex::regex!("(?i)#[0-9a-f]{6}")
             .find_iter(&visible_slice_str)
@@ -1537,14 +1547,142 @@ mod test_render_editor {
     use quickcheck::Arbitrary;
     use quickcheck_macros::quickcheck;
 
-    use super::indentation_guide_updates;
+    use super::{indentation_guide_updates, markup_focused_tab, HighlightSpanRange, Source};
     use crate::{
+        app::Dimension,
         buffer::Buffer,
-        components::{component::Component, editor::Editor},
+        components::{
+            component::Component,
+            editor::{Editor, RegexHighlightRule, RegexHighlightRuleCaptureStyle},
+        },
         context::Context,
+        grid::StyleKey,
         position::Position,
         rectangle::Rectangle,
+        soft_wrap::wrap_items,
+        themes::Color,
     };
+
+    #[test]
+    fn focused_tabs_keep_their_style_at_every_position_and_when_wrapped() {
+        let context = Context::default();
+        let editor = Editor::from_text(None, "");
+        let cases: &[(&[&str], usize, usize)] = &[
+            (&["aaa.rs", "bbb.ts", "ééé.vue"], 0, 80),
+            (&["aaa.rs", "bbb.ts", "ééé.vue"], 1, 80),
+            (&["aaa.rs", "bbb.ts", "ééé.vue"], 2, 80),
+            (&["ééé.rs"], 0, 80),
+            (&["aaa.rs", "ééé.vue"], 1, 8),
+        ];
+        for &(labels, focused, width) in cases {
+            let tabs = labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    let tab = format!(" [-] {label} ");
+                    if index == focused {
+                        markup_focused_tab(&tab)
+                    } else {
+                        tab
+                    }
+                })
+                .collect();
+            let title = wrap_items(tabs, width).join("\n");
+            let grid = editor.get_title_grid(
+                &context,
+                &[],
+                true,
+                &title,
+                Dimension {
+                    height: title.lines().count(),
+                    width: width + 1,
+                },
+            );
+            for (index, label) in labels.iter().enumerate() {
+                let source = if index == focused {
+                    StyleKey::UiFocusedTab
+                } else {
+                    StyleKey::FocusedWindowTitle
+                };
+                let style = context.theme().get_style(&source);
+                let cells = grid
+                    .rows
+                    .iter()
+                    .flatten()
+                    .filter(|cell| cell.symbol == label.chars().next().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(cells.len(), 3, "missing label {label:?} in {title:?}");
+                for cell in cells {
+                    assert_eq!(cell.source, Some(source.clone()), "{title:?}");
+                    assert_eq!(Some(cell.foreground_color), style.foreground_color);
+                    assert_eq!(cell.background_color, style.background_color);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn visible_regex_highlights_preserve_unicode_eof_and_absolute_offsets() {
+        let context = Context::default();
+        let color = Color::from_hex("#a1b2c3").unwrap();
+        for (tail, capture) in [(" #a1b2c3 é", "é"), (" é #a1b2c3", "#a1b2c3")] {
+            for ending in ["", "\n", "\r\n"] {
+                let content = format!("#a1b2c3 é\r\nvisible{tail}{ending}");
+                let mut editor = Editor::from_text(None, &content);
+                editor.set_regex_highlight_rules(vec![RegexHighlightRule {
+                    regex: regex::Regex::new(&format!("(?<token>{})", regex::escape(capture)))
+                        .unwrap(),
+                    capture_styles: vec![RegexHighlightRuleCaptureStyle {
+                        capture_name: "token",
+                        source: Source::StyleKey(StyleKey::UiMark),
+                    }],
+                }]);
+                for visible_lines in [1..2, 1..1] {
+                    let spans = editor
+                        .get_highlight_spans(
+                            context.theme(),
+                            context.current_working_directory(),
+                            &visible_lines,
+                            &[],
+                            &[],
+                            None,
+                            &[],
+                            &[],
+                            true,
+                            false,
+                            &None,
+                        )
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    for (token, source) in [
+                        (capture, Source::StyleKey(StyleKey::UiMark)),
+                        (
+                            "#a1b2c3",
+                            Source::Style(
+                                crate::style::Style::new()
+                                    .background_color(color)
+                                    .foreground_color(color.get_contrasting_color()),
+                            ),
+                        ),
+                    ] {
+                        let actual = spans
+                            .iter()
+                            .filter(|span| span.source == source)
+                            .map(|span| span.range.clone())
+                            .collect::<Vec<_>>();
+                        let start = content.rfind(token).unwrap();
+                        let expected = if visible_lines.is_empty() {
+                            vec![]
+                        } else {
+                            vec![HighlightSpanRange::ByteRange(start..start + token.len())]
+                        };
+                        assert_eq!(actual, expected, "{content:?}, {visible_lines:?}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn indentation_guides_are_added_for_complete_indentation_levels() {
