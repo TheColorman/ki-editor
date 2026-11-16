@@ -43,7 +43,7 @@ Ki's file explorer is rendered using YAML, for example:
 | Label               | Action                                        |
 | ------------------- | --------------------------------------------- |
 | `Add Path`          | Add a new file/folder under current path [^1] |
-| `Dup path`          | Duplicate current file to a new path          |
+| `Dup path`          | Duplicate current file/folder to a new path   |
 | `Delete Paths`      | Delete selected paths [^2]                    |
 | `Move Paths`        | Move (or rename) selected paths [^3]          |
 | `Refresh`           | Refresh file explorer [^4]                    |
@@ -58,6 +58,14 @@ Ki's file explorer is rendered using YAML, for example:
 [^4]: This is necessary sometimes because the file system is modified by external factors, and Ki does not watch for file changes.
 
 [^5]: Similar to `Delete Paths`, you may open multiple files at once via selection extension or multi-cursor.
+
+## Duplicating files and folders
+
+Use `Dup path` (`v` on QWERTY) on a file or folder, enter the destination path in the prompt, and press `Enter`. Missing parent folders are created automatically, and the file explorer reveals the copy. The source is left unchanged; duplicating a file copies its saved contents and preserves any unsaved edits in its open buffer.
+
+Folders are copied recursively, whether collapsed or expanded in the explorer. The copy includes empty folders, hidden files, and ignored files. Symbolic links inside the folder are preserved as links rather than followed.
+
+For a folder, the destination must be a new path: Ki creates the copy at that exact path, rather than merging it into an existing folder or adding another source-named folder underneath it. Copying a folder into itself or one of its descendants is rejected.
 
 ## Tips
 

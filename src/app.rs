@@ -1193,7 +1193,7 @@ impl<T: Frontend> App<T> {
             Dispatch::SafeQuit => self.safe_quit()?,
             Dispatch::RevealInExplorer(path) => self.reveal_path_in_explorer(&path)?,
             Dispatch::OpenMovePathsPrompt => self.open_move_paths_prompt()?,
-            Dispatch::OpenDuplicateFilePrompt => self.open_copy_file_prompt()?,
+            Dispatch::OpenDuplicateFilePrompt => self.open_copy_path_prompt()?,
             Dispatch::OpenAddPathPrompt => self.open_add_path_prompt()?,
             Dispatch::OpenDeletePathsPrompt => self.open_delete_file_prompt()?,
             Dispatch::DeletePaths(paths) => self.delete_paths(paths)?,
@@ -1204,7 +1204,7 @@ impl<T: Frontend> App<T> {
                 sources,
                 destinations,
             } => self.move_paths(sources, destinations)?,
-            Dispatch::CopyFile { from, to } => self.copy_file(from, to)?,
+            Dispatch::CopyFile { from, to } => self.copy_path(from, to)?,
             Dispatch::AddPath(path) => self.add_path(path)?,
             Dispatch::RefreshFileExplorer => self.layout.refresh_file_explorer(&self.context)?,
             Dispatch::SetClipboardContent {
@@ -1698,7 +1698,7 @@ impl<T: Frontend> App<T> {
         }
     }
 
-    fn open_copy_file_prompt(&mut self) -> anyhow::Result<()> {
+    fn open_copy_path_prompt(&mut self) -> anyhow::Result<()> {
         let path = self.get_file_explorer_current_path()?;
         if let Some(path) = path {
             self.open_prompt(PromptConfig::new(
@@ -2596,10 +2596,8 @@ impl<T: Frontend> App<T> {
         Ok(())
     }
 
-    fn copy_file(&mut self, from: AbsolutePath, to: PathBuf) -> anyhow::Result<()> {
-        use std::fs;
-        self.add_path_parent(&to)?;
-        fs::copy(from.clone(), to.clone())?;
+    fn copy_path(&mut self, from: AbsolutePath, to: PathBuf) -> anyhow::Result<()> {
+        let to = crate::copy_path::copy_path(from.as_ref(), &to)?;
         self.layout.refresh_file_explorer(&self.context)?;
         let to = to.try_into()?;
         self.reveal_path_in_explorer(&to)?;
@@ -2607,7 +2605,6 @@ impl<T: Frontend> App<T> {
             from.clone(),
             FromEditor::WorkspaceDidCreateFiles { file_path: to },
         )?;
-        self.layout.remove_suggestive_editor(&from);
         Ok(())
     }
 

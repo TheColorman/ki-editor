@@ -12,6 +12,7 @@ mod clipboard;
 mod components;
 pub mod config;
 mod context;
+mod copy_path;
 mod divide_viewport;
 mod edit;
 mod editor_config;

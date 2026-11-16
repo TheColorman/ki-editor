@@ -3028,6 +3028,160 @@ fn open_search_prompt_in_file_explorer() -> anyhow::Result<()> {
 }
 
 #[test]
+fn duplicate_directory_from_file_explorer() -> anyhow::Result<()> {
+    [false, true].into_iter().try_for_each(|expanded| {
+        execute_test(|s| {
+            let source = s.new_path("original");
+            let destination = s.new_path("backups/duplicate");
+            std::fs::create_dir_all(source.join("nested/empty")).unwrap();
+            let files = [
+                ("nested/data.txt", "nested contents"),
+                (".hidden", "hidden contents"),
+                (".gitignore", "ignored.txt\n"),
+                ("ignored.txt", "ignored contents"),
+            ];
+            for (relative, contents) in files {
+                std::fs::write(source.join(relative), contents).unwrap();
+            }
+
+            let directory_pattern = if expanded {
+                regex!(r" - 📂  original/ :\n")
+            } else {
+                regex!(r" - 📁  original/ :\n")
+            };
+            [
+                App(RefreshFileExplorer),
+                App(RevealInExplorer(source.clone().try_into().unwrap())),
+            ]
+            .into_iter()
+            .chain((!expanded).then_some(App(HandleKeyEvent(key!("enter")))))
+            .chain([
+                Expect(CurrentComponentContentMatches(directory_pattern)),
+                Editor(MatchLiteral("original".to_string())),
+                Expect(CurrentSelectedTexts(&["original"])),
+                App(HandleKeyEvent(key!("v"))),
+                Expect(CurrentComponentTitle(format!(
+                    "Duplicate '{}' to",
+                    source.display()
+                ))),
+                Expect(CurrentMode(Mode::Insert)),
+                Editor(SetContent(destination.display().to_string())),
+                App(HandleKeyEvent(key!("enter"))),
+                Expect(CurrentComponentTitle("File Explorer".to_string())),
+                // Revealing the new directory also expands its newly created parent.
+                Expect(CurrentSelectedTexts(&["   - 📂  duplicate/ :\n"])),
+                ExpectCustom(Box::new(move || {
+                    assert!(destination.join("nested/empty").is_dir());
+                    assert!(source.join("nested/empty").is_dir());
+                    // The destination is the copy itself, not a container for the source.
+                    assert!(!destination.join("original").exists());
+                    for (relative, contents) in files {
+                        assert_eq!(
+                            std::fs::read_to_string(destination.join(relative)).unwrap(),
+                            contents
+                        );
+                        assert_eq!(
+                            std::fs::read_to_string(source.join(relative)).unwrap(),
+                            contents
+                        );
+                    }
+                })),
+            ])
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+        })
+    })
+}
+
+#[test]
+fn duplicate_file_preserves_unsaved_source_buffer() -> anyhow::Result<()> {
+    execute_test(|s| {
+        let destination = s.new_path("copies/main.rs");
+        Box::new([
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Editor(SetContent("// unsaved source buffer\n".to_string())),
+            Editor(MatchLiteral("unsaved".to_string())),
+            Expect(EditorIsDirty()),
+            App(RevealInExplorer(s.main_rs())),
+            App(HandleKeyEvent(key!("v"))),
+            Expect(CurrentComponentTitle(format!(
+                "Duplicate '{}' to",
+                s.main_rs().display_absolute()
+            ))),
+            Editor(SetContent(destination.display().to_string())),
+            App(HandleKeyEvent(key!("enter"))),
+            Expect(CurrentComponentTitle("File Explorer".to_string())),
+            Expect(CurrentSelectedTexts(&["   - 🦀  main.rs\n"])),
+            Expect(OpenedFilesCount(1)),
+            // File duplication copies the saved contents, not the unsaved buffer.
+            ExpectCustom(Box::new({
+                let source = s.main_rs();
+                move || {
+                    assert_eq!(
+                        std::fs::read(source.as_ref()).unwrap(),
+                        std::fs::read(&destination).unwrap()
+                    );
+                }
+            })),
+            App(OpenFile {
+                path: s.main_rs(),
+                owner: BufferOwner::User,
+                focus: true,
+            }),
+            Expect(CurrentComponentContent("// unsaved source buffer\n")),
+            Expect(EditorIsDirty()),
+            Expect(CurrentSelectedTexts(&["unsaved"])),
+        ])
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn duplicate_directory_keeps_symlinked_workspace_root() -> anyhow::Result<()> {
+    execute_test(|s| {
+        let project = s.new_path("project");
+        let alias = s.new_path("project-alias");
+        std::fs::create_dir_all(project.join("original")).unwrap();
+        std::fs::write(project.join("original/file.txt"), "contents").unwrap();
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        let source = alias.join("original");
+        let destination = alias.join("duplicate");
+        let entered_destination = alias.join("missing/../duplicate").display().to_string();
+        Box::new([
+            App(ChangeWorkingDirectory(alias.try_into().unwrap())),
+            App(RevealInExplorer(source.try_into().unwrap())),
+            App(HandleKeyEvent(key!("v"))),
+            Editor(SetContent(entered_destination)),
+            App(HandleKeyEvent(key!("enter"))),
+            Expect(CurrentComponentTitle("File Explorer".to_string())),
+            Expect(CurrentSelectedTexts(&[" - 📂  duplicate/ :\n"])),
+            // A canonicalized destination would reroot the explorer outside the alias.
+            Expect(FileExplorerContent(
+                [
+                    " - ../",
+                    " - 📂  duplicate/ :",
+                    "   - 📝  file.txt",
+                    " - 📂  original/ :",
+                    "   - 📝  file.txt",
+                ]
+                .join("\n"),
+            )),
+            ExpectCustom(Box::new(move || {
+                assert!(!destination.parent().unwrap().join("missing").exists());
+                assert_eq!(
+                    std::fs::read_to_string(destination.join("file.txt")).unwrap(),
+                    "contents"
+                );
+            })),
+        ])
+    })
+}
+
+#[test]
 fn closing_file_explorer_restores_last_focused_editor() -> anyhow::Result<()> {
     execute_test(|s| {
         Box::new([
